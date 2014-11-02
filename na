@@ -1,0 +1,550 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+
+use File::Spec;
+use File::Glob q(glob);
+use File::Basename qw(dirname basename);
+use File::Kvpar;
+use Text::Table;
+use Getopt::Long
+    qw(:config posix_default gnu_compat require_order bundling no_ignore_case);
+
+use constant RED     => '31;1';
+use constant GREEN   => '32;1';
+use constant YELLOW  => '33;1';
+use constant BLUE    => '34;1';
+use constant MAGENTA => '35;1';
+use constant CYAN    => '36;1';
+use constant GRAY    => '30;1';
+use constant DEFAULT => '0';
+
+use constant ACCOUNT     => 'ACCOUNT';
+use constant DATE        => 'DATE';
+use constant ACCOUNTDATE => 'ACCOUNTDATE';
+use constant MEMO        => 'MEMO';
+use constant DESCRIPTION => 'DESCRIPTION';
+use constant AMOUNT      => 'AMOUNT';
+use constant BALANCE     => 'BALANCE';
+use constant LINK        => 'LINK';
+use constant TAG         => 'TAG';
+
+use constant SEP => "\x01";
+
+sub sum;
+sub usage;
+sub note;
+
+my $rxaccount = qr/\@(\S+)/;
+my $rxdate    = qr/[0-2][0-9][0-9][0-9]-?[01][0-9]-?[0-3][0-9]/;  # Allow 0000-00-00 as a placeholder
+my $rxmemo    = qr/\[([^\[\]]*)\]/;
+my $rxdescrip = qr/\{([^\{\}]*)\}/;
+my $rxamount  = qr/([-+])([0-9]+\.[0-9][0-9])/;
+my $rxbalance = qr/=([0-9]+\.[0-9][0-9])/;
+my $rxlink    = qr/\<([^\<\>]*)\>/;
+my $rxtag     = qr/\^(\S+)/;
+
+my %account;
+my $verbose;
+
+my $root = $ENV{'FINANCES'} || glob('~/finances');
+die "Can't determine root" if !defined $root;
+$root = File::Spec->rel2abs($root);
+chdir $root or die "Can't chdir $root: $!";
+
+usage if !@ARGV;
+foreach ($ARGV[0]) {
+    unshift(@ARGV, 'find'), last if m{^[/@]|^\d{4}};
+}
+
+my $sub = __PACKAGE__->can('cmd_' . shift @ARGV) || usage;
+$sub->();
+
+sub cmd_accounts {
+    my $all;
+    GetOptions(
+        'a' => \$all,
+    ) or usage;
+    read_accounts();
+    my $tb = Text::Table->new('Code', \SEP, 'Class', \SEP, 'Path', \SEP, 'Description');
+    my @rows;
+    foreach my $acode (sort grep { /^\@/ } keys %account) {
+        my $account = $account{$acode};
+        my ($aclass, $apath, $adesc) = @$account{qw(class path description)};
+        if (!defined $apath) {
+            next if !$all;
+            $apath = '--';
+        }
+        push @rows, [ $acode, $aclass, $apath, $adesc ];
+    }
+    $tb->load(sort { $a->[0] cmp $b->[0] } @rows);
+    print map { s/\x01/  /g; $_ } $tb->title, $tb->body_rule('-', SEP), $tb->body;
+    #print $tb->title, $tb->body;
+    #print $tb->title, $tb->body_rule(\&dash, \&gap), $tb->body;
+}
+
+sub dash { scalar('-' x $_[1]) }
+sub gap  { '  ' }
+
+sub cmd_stm { goto &cmd_statements }
+
+sub cmd_statements {
+    my ($verbose, $period);
+    GetOptions(
+        'p=s' => \$period,
+        'v' => \$verbose,
+    );
+    if (defined $period) {
+        $period =~ /^(\d\d\d\d)(?:-?(\d\d)?)$/ or usage;
+        $period = $1; $period .= $2 if defined $2;
+    }
+    read_accounts();
+    my @accounts = @ARGV;
+    @accounts = sort grep { !/\@/ } keys %account if !@accounts;
+    foreach (@accounts) {
+        my $account = $account{$_}
+            or die "Unrecognized account: $_";
+        my ($apath, $aclass, $acode) = @$account{qw(path class code)};
+        if (!defined $apath) {
+            print STDERR "Warning: not a statement account: $_\n" if @ARGV;
+            next;
+        }
+        my @statements = sort map { basename($_) } grep { -d } glob("$apath/statements/*");
+        next if !@statements;
+        note "<<[$apath]>>", MAGENTA if $verbose;
+        my $prevmon;
+        foreach (@statements) {
+            my $len = length("$apath/statements/$_/");
+            my @files = map { substr($_, $len) } grep { -f } glob("$apath/statements/$_/*");
+            if (/^(\d\d\d\d)-(\d\d)/) {
+                my ($y, $m) = ($1, $2);
+                if (defined($period)) {
+                    next if substr($period, 0, 4) ne $y;
+                    next if length($period) > 4 && substr($period, 4, 2) ne $m;
+                }
+                else {
+                    my $mon = $y * 12 + $m;
+                    if ($verbose && defined($prevmon) && $mon > $prevmon + 1) {
+                        note '<<???>>', YELLOW;
+                    }
+                    $prevmon = $mon;
+                }
+                print join(' ', $_, $acode, @files), "\n";
+                #print $_, ' ', $apath, "\n";
+            }
+        }
+    }
+}
+
+sub cmd_import {
+    GetOptions(
+        'v' => \$verbose,
+    );
+    read_accounts();
+    @ARGV = sort grep { !/\@/ } keys %account if !@ARGV;
+    open my $fh, '+>>', 'journal'
+    or die "Can't open journal: $!";
+
+    foreach my $apath (@ARGV) {
+        my @files = grep -f, glob("$apath/inbox/*");
+        next if !@files;
+        if (!-d "$apath/statements") {
+            note '<<skip>>', YELLOW if $verbose;
+            next;
+        }
+        note "<<[$apath]>>", MAGENTA;
+        my %cdate;
+        foreach my $f (@files) {
+            my ($stmt, $cdate, $trx);
+            my $fname = basename($f);
+            my $ok = eval {
+                $stmt = read_statement($apath, $f);
+                die "can't parse" if !$stmt;
+                ($cdate, $trx) = @$stmt{qw(cdate transactions)};
+                die 'no transactions found' if !@$trx;
+                my $sdir = "$apath/statements/$cdate";
+                my @done = glob("$sdir/*");
+                die 'already processed?' if @done;
+                my $s = "$sdir/$fname";
+                die "mkdir $s: $!" if !-d $sdir && !mkdir $sdir;
+                print $fh
+                    "# Statement $cdate $apath\n",
+                    @$trx,
+                    "\n";
+                rename $f, $s or die "rename $f $s: $!";
+                note "  <<ok>> $cdate $fname";
+            };
+            if (!$ok) {
+                my ($msg) = split /\n/, $@;
+                $msg =~ s/ at .+ line \d+\.$//;
+                $cdate = '????-??-??' if !defined $cdate;
+                note " <<err>> $cdate $fname :: $msg", RED;
+            }
+        }
+    }
+}
+
+sub cmd_apply {
+    # Apply rules
+    my $rules_file = 'rules';
+    my ($dry_run, $verbose, $from_stdin, $debug);
+    GetOptions(
+        'f=s' => \$rules_file,
+        'n'   => \$dry_run,
+        'v'   => \$verbose,
+        'i'   => \$from_stdin,
+        'd'   => \$debug,
+    ) or usage;
+    $verbose = 1 if $debug;
+    my @rules = read_rules($rules_file);
+    if ($dry_run) {
+        open STDIN, '<', 'journal' or die "Can't open journal: $!" if !$from_stdin;
+    }
+    else {
+        rename 'journal', 'journal-' or die "Can't move journal: $!";
+        open STDIN,  '<', 'journal-' or die "Can't open journal-: $!";
+        open STDOUT, '>', 'journal+' or die "Can't open journal+: $!";
+    }
+    my $str;
+    while (<STDIN>) {
+        chomp;
+        next if /^\s*(#.*)?$/;  # Not a transaction
+        s/ \@unknown$//;
+        $str = $_;
+        my @parts = parse_transaction($_);
+        if (!@parts) {
+            print STDERR "unparsed: $str\n" if $debug;
+            next;
+        }
+        my $date = shift(@parts)->[1];
+        shift @parts if @parts && $parts[0][1] eq '[]';
+        ### if (grep { $_->[0] eq MEMO } @parts) {
+        ###     # Already done
+        ###     print STDERR "skip: $str\n" if $debug;
+        ###     next;
+        ### }
+        if (/\s$rxaccount\s.* $rxaccount\b/) {
+            my $sum = sum map { $_->[0] eq AMOUNT ? $_->[1] : 0 } @parts;
+            next if abs($sum) < 0.01;
+        }
+        my @descrips = map { $_->[1] } grep { $_->[0] eq DESCRIPTION && $_->[1] ne '{}' } @parts;
+        if (!@descrips || $descrips[0] !~ $rxdescrip) {
+            print STDERR "huh? $str\n" if $debug;
+            next;
+        }
+        my $descrip = $1;
+        next if !length($descrip);
+        my $append;
+        foreach my $rule (@rules) {
+            my ($memo, $code, $src) = @$rule;
+            local $_ = $descrip;
+            if (defined($append = $code->())) {
+                if ($debug) {
+                    print STDERR 'match: ', $str, "\n";
+                    print STDERR "rule:\n";
+                    print STDERR '  ', $_, "\n" for split /\n/, $src;
+                    print STDERR "\n";
+                }
+                last;
+            }
+        }
+        if (!defined $append) {
+            print STDERR 'no match: ', $str, "\n" if $debug;
+            $append = '[] @unknown';
+        }
+        my @append = parse_transaction("0000-00-00 $append");
+        next if !@append;
+        shift @append;  # Drop the phony date
+        next if !@append;
+        my @out = ( $date );
+        my @memo  = grep { $_->[0] eq MEMO } @append;
+        my @other = grep { $_->[0] ne MEMO } @append;
+        @memo = ([ MEMO, '[]' ]) if !@memo;
+        @memo = () if grep { $_->[0] eq MEMO } @parts;
+        push @out, $_->[1] for @memo, @parts, @other;
+        my $sum = sum map { $_->[0] eq AMOUNT ? $_->[1] : 0 } ( @parts, @other );
+        push @out, sprintf('%+.2f', -$sum) if abs($sum) >= 0.01;
+        $_ = join(' ', @out);
+    }
+    continue {
+        if ($dry_run) {
+            print $_, "\n" if !/^\s*(?:#.*)?$/ && defined $str && $_ ne $str;
+        }
+        else {
+            print $_, "\n";
+        }
+        #print $_, "\n" if !$dry_run || !defined($str) || $_ ne $str;
+    }
+    if (!$dry_run) {
+        rename 'journal+', 'journal'  or die "Can't rename journal+: $!";
+        unlink 'journal~';
+        rename 'journal-', 'journal~' or die "Can't rename journal-: $!";
+    }
+}
+
+sub sum {
+    my $n = 0;
+    $n += $_ for @_;
+    return $n;
+}
+
+sub note {
+    my ($note, $color) = @_;
+    $color ||= GREEN;
+    $note =~ s/<</\e[${color}m/;
+    $note =~ s/>>/\e[0m/;
+    print STDERR $note, "\n";
+}
+
+sub read_statement {
+    my ($apath, $f) = @_;
+    local %ENV = %ENV;
+    local $SIG{PIPE} = 'IGNORE';
+    my $acode = $account{$apath}{'code'};
+    my $adir = File::Spec->rel2abs($apath);
+    while ($adir ge $root) {
+        my $bin = "$adir/bin";
+        $ENV{'PATH'} .= ':' . $bin if -e $bin;
+        $adir = dirname($adir);
+    }
+    open my $fh, '-|', 'stmt2trx', $acode, $f
+        or die "Can't exec stmt2trx: $!";
+    my @trx = <$fh>;
+    close $fh or die 'stmt2trx failed: ', $? >> 8;
+    return if @trx < 1;
+    return if shift(@trx) !~ /^statement odate=(\d{4}-\d\d-\d\d) cdate=(\d{4}-\d\d-\d\d)$/;
+    my ($odate, $cdate) = ($1, $2);
+    my %stmt = (
+        'transactions' => [ sort { substr($a,0,10) cmp substr($b,0,10) } @trx ],
+        'odate' => $odate,
+        'cdate' => $cdate,
+    );
+    return \%stmt;
+}
+
+sub read_accounts {
+    local $/ = "\n";
+    open my $fh, '<', 'accounts' or die;
+    while (<$fh>) {
+        # @CODE CLASS {DESCRIP}
+        # @CODE CLASS {DESCRIP} PATH
+        next if !m{^\s*$rxaccount\s+(\S+)\s+$rxdescrip(?:\s+(\S+))?$}i;
+        my ($acode, $aclass, $adescrip, $apath) = ($1, $2, trim($3), trim($4));
+        undef $apath if defined($apath) && $apath eq '--';
+        $aclass =~ s/:$/:$acode/;
+        $account{'@'.$acode} = $account{$aclass} = {
+            'code' => '@'.$acode,
+            'class' => $aclass,
+            'path' => $apath,
+            'description' => $adescrip,
+        };
+        $account{$apath} = $account{$aclass} if defined $apath;
+    }
+}
+
+sub trim {
+    local $_ = shift;
+    return if !defined;
+    s/^\s+|\s+$//g;
+    return $_;
+}
+
+sub parse_transaction {
+    local $_ = shift;
+    my @parts;
+    return if !s/^($rxdate)(?=\s)//;
+    push @parts, [DATE, $1];
+    while (s/^\s+(?=\S)//) {
+        push(@parts, [ACCOUNT,     $1]), next if s/^($rxaccount)//;
+        push(@parts, [MEMO,        $1]), next if s/^($rxmemo)//;
+        push(@parts, [DESCRIPTION, $1]), next if s/^($rxdescrip)//;
+        push(@parts, [AMOUNT,      $1]), next if s/^($rxamount)//;
+        push(@parts, [ACCOUNTDATE, $1]), next if s/^(&$rxdate)//;
+        push(@parts, [BALANCE,     $1]), next if s/^($rxbalance)//;
+        push(@parts, [LINK,        $1]), next if s/^($rxlink)//;
+        push(@parts, [TAG,         $1]), next if s/^($rxtag)//;
+        die "What's this? $_\n";
+    }
+    return @parts;
+}
+
+sub old_parse_transaction {
+    local $_ = shift;
+    my %trx = (
+        'str'  => $_,
+        'lno'  => $.,
+    );
+    die "Bad transaction: $_"
+        if !s/^(\d{4})-?(\d{2})-?(\d{2})//;
+    $trx{'date'} = "$1-$2-$3";
+    # TRX := DATE MEMO STMT_AC STMT_AMT [STMT_BAL] [AC [AMT]]... [DESCRIP]
+    # 2014-10-20 [] @checking &2014-10-18 -44.13 =10239.51 {...}
+    # YYYY-MM-DD WORDS @NICK|<CODE> +AMOUNT|-AMOUNT {DESCRIP}
+    # YYYY-MM-DD
+    # [MEMO]
+    # @ACCOUNT
+    # +AMOUNT|-AMOUNT
+    # =BALANCE
+    # @ACCOUNT +AMOUNT|-AMOUNT {DESCRIP}
+    $trx{'raw'}     = trim($1) if s/\s+{([^{}]*)}$//;
+    $trx{'trxdate'} = $1 if s/\s+\&(\d{4})-?(\d{2})-?(\d{2})//;
+    my %sum = ( '-' => 0, '+' => 0 );
+    my @entries;
+    foreach (split /\s+(?=\@)/) {
+        my %entry;
+        s/^\@(\S+)// or die "Bad entry: $_";
+        $entry{'account'} = $1;
+        if (s/\s+([-+])([0-9]+(?:\.[0-9]+)?)([A-Z]+)?$//) {
+            $entry{'amount'}  = $1 . $2;
+            $entry{'currency'} = $3;
+            $sum{$1} += $2;
+        }
+        $entry{'balance'} = $1 if s/\s+\=([-+]?[0-9]+(?:\.[0-9]+)?(?:[A-Z]+)?)//;
+        $entry{'memo'}    = $1 if s/\s+\<([^<>]+)\>//;
+        $entry{'refnum'}  = $1 if s/\s+\#(\S+)//;
+        $entry{'fkey'}    = split(/,\s*/, $1) if s/\s+\[([^][]+)\]//;
+        die "Junk in part: $_" if /\S/;
+        push @entries, \%entry;
+    }
+    $trx{'entries'} = \@entries;
+    if (!defined $entries[-1]{'amount'}) {
+        my $diff = $sum{'-'} - $sum{'+'};
+        $entries[-1]{'amount'} = $diff;
+    }
+    return \%trx;
+}
+
+sub read_rules {
+    my ($f) = @_;
+    open my $fh, '<', $f or die;
+    local $/ = '';
+    my @rules;
+    while (<$fh>) {
+        chomp;
+        my $src = $_;
+        s/^[ \t]*#.*//m;
+        next if !/\S/;
+        my ($head, @tail) = split /\n[ \t]+/;
+        my $tail = join(' ', @tail);
+        for ($tail) {
+            s/\s+/ /msg;
+            s/^ | $//g;
+        }
+        my $memo;
+        if ($tail =~ s/\[([^][]+)\]/[]/) {
+            $memo = $1;
+        }
+        else {
+            $tail = "[] $tail";
+        }
+        foreach (split /\n/, $head) {
+            next if /^\s*#/ || !/\S/;
+            my ($rx, $defmemo) = parse_pattern($_);
+            $defmemo = $memo if defined $memo;
+            push @rules, [
+                $defmemo,
+                sub {
+                    return if $_ !~ $rx;
+                    my $m = $defmemo;
+                    my @plus  = @+;
+                    my @minus = @-;
+                    $m =~ s/\$(\d+)/substr($_, $minus[$1], $plus[$1] - $minus[$1])/eg;
+                    my $str = $tail;
+                    $str =~ s/\[\]/[$m]/;
+                    return $str;
+                },
+                $src,
+            ];
+        }
+    }
+    return @rules;
+}
+
+sub parse_pattern {
+    local $_ = shift;
+    die if !m{^/(.+)/([a-z]*)$};
+    my ($pat, $mod) = ($1, $2 || 'i');
+    my $str = $pat;
+    $str =~ tr{A-Za-z0-9 -'/,&}{}cd;
+    $str =~ s/^ | $//g;
+    $pat = '\b' . $pat . '\b' if $mod =~ s/w//;
+    return qr/(?$mod)$pat/i, $str;
+}
+
+sub read_journal {
+    my ($f) = @_;
+    open my $fh, '<', $f or die;
+    my @trx;
+    while (<$fh>) {
+        next if /^\s*(?:#.*)?$/;
+        chomp;
+        die "Bad line in journal: $_"
+            if !/^\d/;
+        push @trx, parse_transaction($_);
+    }
+    return @trx;
+}
+
+=pod
+
+=head1 NAME
+
+na - simple double-entry bookkeeping for personal finances
+
+=head1 SYNOPSIS
+
+B<na> import [I<ACCOUNT>...]
+
+B<na> enter [I<DATE>] I<ACCOUNT> I<AMOUNT> I<ACCOUNT> I<DESCRIP>
+
+=head1 JOURNAL FORMAT
+
+The journal file (normally named C<journal>) contains all transactions that
+have been entered manually or imported.
+
+Each transaction is on a separate line; there is no provision for wrapping
+transactions.
+
+Blank lines, including lines consisting of only whitespace, are ignored.
+
+Whole-line comments are also ignored; these consist of optional initial
+whitespace followed by the pound sign C<#> and then the comment (or nothing).
+
+=head1 TRANSACTIONS
+
+A transaction consists of a date in the form B<YYYY-MM-DD> followed by any or
+all of the following elements, each preceded by whitespace:
+
+=over 4
+
+=item B<Raw description>
+
+Any text, enclosed in curly braces:
+
+    {ACME SMALL APPLIANCE REPAIR INC}
+
+=item B<Cooked description>
+
+A sequence of words, each beginning with an alphanumeric character or one of the characters C<(> C<"> C<'>:
+
+    Acme (toaster)
+
+=item B<Account or category>
+
+Every account element except the last must be followed by an amount.
+
+The amounts in a transaction must add up to zero.
+
+If the last account is not followed by an amount, the amount is inferred -- it
+is the amount which, when added to the other amounts, yields the value zero.
+
+
+
+=item B<Amount>
+
+
+
+
+=back
+
