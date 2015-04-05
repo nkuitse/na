@@ -3,10 +3,11 @@
 use strict;
 use warnings;
 
+use Term::ReadLine::Zoid;
+use Text::ParseWords;
 use File::Spec;
 use File::Glob q(glob);
 use File::Basename qw(dirname basename);
-use File::Kvpar;
 use Text::Table;
 use Getopt::Long
     qw(:config posix_default gnu_compat require_order bundling no_ignore_case);
@@ -20,9 +21,10 @@ use constant CYAN    => '36;1';
 use constant GRAY    => '30;1';
 use constant DEFAULT => '0';
 
-use constant ACCOUNT     => 'ACCOUNT';
 use constant DATE        => 'DATE';
-use constant ACCOUNTDATE => 'ACCOUNTDATE';
+use constant REF         => 'REF';
+use constant ACCOUNT     => 'ACCOUNT';
+use constant ACCOUNTDATE => 'ACCOUNT_DATE';
 use constant MEMO        => 'MEMO';
 use constant DESCRIPTION => 'DESCRIPTION';
 use constant AMOUNT      => 'AMOUNT';
@@ -34,26 +36,43 @@ use constant SEP => "\x01";
 
 sub sum;
 sub usage;
+sub iusage;
 sub note;
+sub uniq;
+sub setvar;
 
 my $rxaccount = qr/\@(\S+)/;
+my $rxref     = qr/\*(\S+)/;
 my $rxdate    = qr/[0-2][0-9][0-9][0-9]-?[01][0-9]-?[0-3][0-9]/;  # Allow 0000-00-00 as a placeholder
 my $rxmemo    = qr/\[([^\[\]]*)\]/;
 my $rxdescrip = qr/\{([^\{\}]*)\}/;
 my $rxamount  = qr/([-+])([0-9]+\.[0-9][0-9])/;
 my $rxbalance = qr/=([0-9]+\.[0-9][0-9])/;
 my $rxlink    = qr/\<([^\<\>]*)\>/;
-my $rxtag     = qr/\^(\S+)/;
+my $rxtag     = qr/\:(\S+)/;
+
+my %operator = (
+    AND => \&_and,
+    OR  => \&_or,
+    NOT => \&_not,
+);
 
 my %account;
 my $verbose;
+my %var;
+my @sets;
+my $next_set = 1;
+my $running;
+my @rules;
+my @all;
 
 my $root = $ENV{'FINANCES'} || glob('~/finances');
 die "Can't determine root" if !defined $root;
 $root = File::Spec->rel2abs($root);
 chdir $root or die "Can't chdir $root: $!";
 
-usage if !@ARGV;
+@ARGV = qw(loop) if !@ARGV;
+
 foreach ($ARGV[0]) {
     unshift(@ARGV, 'find'), last if m{^[/@]|^\d{4}};
 }
@@ -61,13 +80,171 @@ foreach ($ARGV[0]) {
 my $sub = __PACKAGE__->can('cmd_' . shift @ARGV) || usage;
 $sub->();
 
+sub cmd_find {
+    print $_, "\n" for filter_journal(@ARGV);
+}
+
+sub cmd_loop {
+    my $term = Term::ReadLine::Zoid->new('na');
+    my $prompt = 'na> ';
+    my $OUT = $term->OUT || \*STDOUT;
+    $running = 1;
+    read_journal();
+    setvar 's0' => \@all;
+    while ($running) {
+        local $_ = $term->readline($prompt);
+        $_ = 'find ' . $_ if /^\@/;
+        @ARGV = shellwords($_);
+        my $sub = __PACKAGE__->can('icmd_' . shift @ARGV) || usage;
+        $sub->();
+    }
+}
+
+sub icmd_quit {
+    $running = 0;
+}
+
+sub getvar { $var{$_[0]} // die }
+
+sub setvar {
+    while (@_) {
+        my ($k, $v) = splice @_, 0, 2;
+        $var{$k} = $v;
+    }
+}
+
+sub next_set { 's' . $next_set++ }
+
+sub mkset {
+    my $ns = next_set();
+    setvar '*' => $ns, $ns => shift;
+    return $ns;
+}
+
+sub icmd_not {
+    my $s = getvar('*');
+    mkset _complement(getvar('@'), getvar($s));
+}
+
+sub icmd_find {
+    # find 2014 @groceries
+    # f 201201..201206
+    # @fees @taxes
+    iusage if !@ARGV;
+    my @sel;
+    if (@ARGV == 3 && $operator{uc $ARGV[1]}) {
+        my @a = operand_value($ARGV[0]);
+        my @b = operand_value($ARGV[2]);
+        my $op = $operator{uc $ARGV[1]};
+        @sel = apply($op, \@a, \@b);
+    }
+    else {
+        @sel = @all;
+        _find_transactions(\@sel, $_) for @ARGV;
+    }
+    mkset \@sel;
+}
+
+sub _and {
+    my %a = map { $_ => 1 } @{ shift() };
+    my @result;
+    foreach (@{ shift() }) {
+        push @result, $_ if $a{$_};
+    }
+    return @result;
+}
+
+sub _or {
+    my %a = map { $_ => 1 } @{ shift() };
+    %a = ( %a, map { $_ => 1 } @{ shift() } );
+    return keys %a;
+}
+
+sub apply {
+    my ($op, $a, $b) = @_;
+    $op->($a, $b);
+}
+
+sub operand_value {
+    local $_ = shift;
+    return by_account($_) if /^\@/;
+}
+
+sub _find_transactions {
+    my ($ary, $cond) = @_;
+    if ($cond =~ /^\@/) {
+        @$ary = grep { has_account($_, $cond) } @$ary;
+    }
+    my %acc  = map { $_ => 1 } grep { /^\@/ } @_;
+    my %date = map { $_ => 1 } map { expand_dates($_) } grep { /^[12]/ } @_;
+    my @rx   = map { qr/$_/  } map { m{^/(.+)/$} ? ($1) : () } @_;
+}
+
+sub by_account {
+    my %want = map { $_ => 1 } @_;
+    my @out;
+    foreach (@all) {
+        my @tokens = parse($_);
+        my $head = shift @tokens;
+        my @tail = grep { $want{$_->{'account'}} } @tokens;
+        push @out, [ $head, @tail ] if @tail;
+    }
+    return @out;
+}
+
+sub by_date {
+    my ($d1, $d2) = @_;
+    $d2 = $d1 if !defined $d1;
+    $d1 =~ s/(?<=^\d\d\d\d)$/-01/;
+    $d1 =~ s/(?<=^\d\d\d\d-\d\d)$/-01/;
+    $d2 =~ s/(?<=^\d\d\d\d)$/-12/;
+    $d2 =~ s/(?<=^\d\d\d\d-\d\d)$/-31/;
+}
+
+sub cmd_sum {
+    read_accounts();
+    my $tb = make_table(qw(Total Code Class Description));
+    my @rows;
+    #open STDIN, '<', 'journal' or die "Can't open journal: $!";
+    my %sum;
+    while (<STDIN>) {
+        chomp;
+        next if /^\s*(#.*)?$/;  # Not a transaction
+        while (/ (\@\S+) ([-+]\d+\.\d\d)\b/g) {
+            $sum{$1} += $2;
+        }
+    }
+    foreach (sort keys %sum) {
+        my $account = $account{$_};
+        my ($aclass, $adesc) =
+            $account ? @$account{qw(class description)}
+                     : qw(-- --)
+                     ;
+
+        push @rows, [ sprintf('%+11.2f', $sum{$_}), $_, $aclass, $adesc ];
+    }
+    $tb->load(@rows);
+    print_table($tb);
+}
+
+sub cmd_burst {
+    read_accounts();
+    open STDIN, '<', 'journal' or die if ! -t;
+    read_journal();
+    foreach (@all) {
+        while (my ($k, $v) = each %$_) {
+            1;
+        }
+    }
+}
+
 sub cmd_accounts {
     my $all;
     GetOptions(
         'a' => \$all,
     ) or usage;
     read_accounts();
-    my $tb = Text::Table->new('Code', \SEP, 'Class', \SEP, 'Path', \SEP, 'Description');
+    my $tb = make_table(qw(Code Class Path Description));
     my @rows;
     foreach my $acode (sort grep { /^\@/ } keys %account) {
         my $account = $account{$acode};
@@ -79,13 +256,8 @@ sub cmd_accounts {
         push @rows, [ $acode, $aclass, $apath, $adesc ];
     }
     $tb->load(sort { $a->[0] cmp $b->[0] } @rows);
-    print map { s/\x01/  /g; $_ } $tb->title, $tb->body_rule('-', SEP), $tb->body;
-    #print $tb->title, $tb->body;
-    #print $tb->title, $tb->body_rule(\&dash, \&gap), $tb->body;
+    print_table($tb);
 }
-
-sub dash { scalar('-' x $_[1]) }
-sub gap  { '  ' }
 
 sub cmd_stm { goto &cmd_statements }
 
@@ -144,7 +316,7 @@ sub cmd_import {
     read_accounts();
     @ARGV = sort grep { !/\@/ } keys %account if !@ARGV;
     open my $fh, '+>>', 'journal'
-    or die "Can't open journal: $!";
+        or die "Can't open journal: $!";
 
     foreach my $apath (@ARGV) {
         my @files = grep -f, glob("$apath/inbox/*");
@@ -188,16 +360,19 @@ sub cmd_import {
 sub cmd_apply {
     # Apply rules
     my $rules_file = 'rules';
-    my ($dry_run, $verbose, $from_stdin, $debug);
+    my ($dry_run, $verbose, $from_stdin, $debug, $memo_fmt);
     GetOptions(
         'f=s' => \$rules_file,
         'n'   => \$dry_run,
         'v'   => \$verbose,
         'i'   => \$from_stdin,
         'd'   => \$debug,
+        'm=s' => \$memo_fmt,
     ) or usage;
     $verbose = 1 if $debug;
-    my @rules = read_rules($rules_file);
+    $memo_fmt =~ s/^\[?/[/;  # Make sure the specified
+    $memo_fmt =~ s/\]?$/]/;  # format is bracketed
+    read_rules($rules_file);
     if ($dry_run) {
         open STDIN, '<', 'journal' or die "Can't open journal: $!" if !$from_stdin;
     }
@@ -211,24 +386,25 @@ sub cmd_apply {
         chomp;
         next if /^\s*(#.*)?$/;  # Not a transaction
         s/ \@unknown$//;
+        s/ \@\@/ @/g;
         $str = $_;
-        my @parts = parse_transaction($_);
-        if (!@parts) {
+        my @tokens = tokenize($_);
+        if (!@tokens) {
             print STDERR "unparsed: $str\n" if $debug;
             next;
         }
-        my $date = shift(@parts)->[1];
-        shift @parts if @parts && $parts[0][1] eq '[]';
-        ### if (grep { $_->[0] eq MEMO } @parts) {
+        my $date = shift(@tokens)->[1];
+        shift @tokens if @tokens && $tokens[0][1] eq '[]';
+        ### if (grep { $_->[0] eq MEMO } @tokens) {
         ###     # Already done
         ###     print STDERR "skip: $str\n" if $debug;
         ###     next;
         ### }
         if (/\s$rxaccount\s.* $rxaccount\b/) {
-            my $sum = sum map { $_->[0] eq AMOUNT ? $_->[1] : 0 } @parts;
+            my $sum = sum map { $_->[0] eq AMOUNT ? $_->[1] : 0 } @tokens;
             next if abs($sum) < 0.01;
         }
-        my @descrips = map { $_->[1] } grep { $_->[0] eq DESCRIPTION && $_->[1] ne '{}' } @parts;
+        my @descrips = map { $_->[1] } grep { $_->[0] eq DESCRIPTION && $_->[1] ne '{}' } @tokens;
         if (!@descrips || $descrips[0] !~ $rxdescrip) {
             print STDERR "huh? $str\n" if $debug;
             next;
@@ -253,7 +429,7 @@ sub cmd_apply {
             print STDERR 'no match: ', $str, "\n" if $debug;
             $append = '[] @unknown';
         }
-        my @append = parse_transaction("0000-00-00 $append");
+        my @append = tokenize($append);
         next if !@append;
         shift @append;  # Drop the phony date
         next if !@append;
@@ -261,9 +437,13 @@ sub cmd_apply {
         my @memo  = grep { $_->[0] eq MEMO } @append;
         my @other = grep { $_->[0] ne MEMO } @append;
         @memo = ([ MEMO, '[]' ]) if !@memo;
-        @memo = () if grep { $_->[0] eq MEMO } @parts;
-        push @out, $_->[1] for @memo, @parts, @other;
-        my $sum = sum map { $_->[0] eq AMOUNT ? $_->[1] : 0 } ( @parts, @other );
+        @memo = () if grep { $_->[0] eq MEMO } @tokens;
+        @memo = map {
+            (my $str = $_) =~ s/\[ *([^\[\]]+) *\]/sprintf($memo_fmt, $1)/;
+            $str;
+        } @memo if defined $memo_fmt;
+        push @out, $_->[1] for @memo, @tokens, @other;
+        my $sum = sum map { $_->[0] eq AMOUNT ? $_->[1] : 0 } ( @tokens, @other );
         push @out, sprintf('%+.2f', -$sum) if abs($sum) >= 0.01;
         $_ = join(' ', @out);
     }
@@ -281,6 +461,19 @@ sub cmd_apply {
         unlink 'journal~';
         rename 'journal-', 'journal~' or die "Can't rename journal-: $!";
     }
+}
+
+# Other functions
+
+sub make_table {
+    my @head = map { $_, \SEP } @_;
+    pop @head if @head;
+    return Text::Table->new(@head);
+}
+
+sub print_table {
+    my ($tb) = @_;
+    print map { s/\x01/  /g; $_ } $tb->title, $tb->body_rule('-', SEP), $tb->body;
 }
 
 sub sum {
@@ -350,76 +543,30 @@ sub trim {
     return $_;
 }
 
-sub parse_transaction {
+sub tokenize {
     local $_ = shift;
-    my @parts;
-    return if !s/^($rxdate)(?=\s)//;
-    push @parts, [DATE, $1];
+    my @tokens;
+    push(@tokens, [DATE, $1]) if s/^($rxdate)(?=\s)//;
+    push(@tokens, [REF,  $1]) if s/^ ($rxref)(?=\s)//;
     while (s/^\s+(?=\S)//) {
-        push(@parts, [ACCOUNT,     $1]), next if s/^($rxaccount)//;
-        push(@parts, [MEMO,        $1]), next if s/^($rxmemo)//;
-        push(@parts, [DESCRIPTION, $1]), next if s/^($rxdescrip)//;
-        push(@parts, [AMOUNT,      $1]), next if s/^($rxamount)//;
-        push(@parts, [ACCOUNTDATE, $1]), next if s/^(&$rxdate)//;
-        push(@parts, [BALANCE,     $1]), next if s/^($rxbalance)//;
-        push(@parts, [LINK,        $1]), next if s/^($rxlink)//;
-        push(@parts, [TAG,         $1]), next if s/^($rxtag)//;
+        push(@tokens, [ACCOUNT,     $1]), next if s/^($rxaccount)//;
+        push(@tokens, [MEMO,        $1]), next if s/^($rxmemo)//;
+        push(@tokens, [DESCRIPTION, $1]), next if s/^($rxdescrip)//;
+        push(@tokens, [AMOUNT,      $1]), next if s/^($rxamount)//;
+        push(@tokens, [ACCOUNTDATE, $1]), next if s/^(&$rxdate)//;
+        push(@tokens, [BALANCE,     $1]), next if s/^($rxbalance)//;
+        push(@tokens, [LINK,        $1]), next if s/^($rxlink)//;
+        push(@tokens, [TAG,         $1]), next if s/^($rxtag)//;
         die "What's this? $_\n";
     }
-    return @parts;
-}
-
-sub old_parse_transaction {
-    local $_ = shift;
-    my %trx = (
-        'str'  => $_,
-        'lno'  => $.,
-    );
-    die "Bad transaction: $_"
-        if !s/^(\d{4})-?(\d{2})-?(\d{2})//;
-    $trx{'date'} = "$1-$2-$3";
-    # TRX := DATE MEMO STMT_AC STMT_AMT [STMT_BAL] [AC [AMT]]... [DESCRIP]
-    # 2014-10-20 [] @checking &2014-10-18 -44.13 =10239.51 {...}
-    # YYYY-MM-DD WORDS @NICK|<CODE> +AMOUNT|-AMOUNT {DESCRIP}
-    # YYYY-MM-DD
-    # [MEMO]
-    # @ACCOUNT
-    # +AMOUNT|-AMOUNT
-    # =BALANCE
-    # @ACCOUNT +AMOUNT|-AMOUNT {DESCRIP}
-    $trx{'raw'}     = trim($1) if s/\s+{([^{}]*)}$//;
-    $trx{'trxdate'} = $1 if s/\s+\&(\d{4})-?(\d{2})-?(\d{2})//;
-    my %sum = ( '-' => 0, '+' => 0 );
-    my @entries;
-    foreach (split /\s+(?=\@)/) {
-        my %entry;
-        s/^\@(\S+)// or die "Bad entry: $_";
-        $entry{'account'} = $1;
-        if (s/\s+([-+])([0-9]+(?:\.[0-9]+)?)([A-Z]+)?$//) {
-            $entry{'amount'}  = $1 . $2;
-            $entry{'currency'} = $3;
-            $sum{$1} += $2;
-        }
-        $entry{'balance'} = $1 if s/\s+\=([-+]?[0-9]+(?:\.[0-9]+)?(?:[A-Z]+)?)//;
-        $entry{'memo'}    = $1 if s/\s+\<([^<>]+)\>//;
-        $entry{'refnum'}  = $1 if s/\s+\#(\S+)//;
-        $entry{'fkey'}    = split(/,\s*/, $1) if s/\s+\[([^][]+)\]//;
-        die "Junk in part: $_" if /\S/;
-        push @entries, \%entry;
-    }
-    $trx{'entries'} = \@entries;
-    if (!defined $entries[-1]{'amount'}) {
-        my $diff = $sum{'-'} - $sum{'+'};
-        $entries[-1]{'amount'} = $diff;
-    }
-    return \%trx;
+    die "What's this? $_\n" if /\S/;
+    return @tokens;
 }
 
 sub read_rules {
     my ($f) = @_;
     open my $fh, '<', $f or die;
     local $/ = '';
-    my @rules;
     while (<$fh>) {
         chomp;
         my $src = $_;
@@ -432,7 +579,7 @@ sub read_rules {
             s/^ | $//g;
         }
         my $memo;
-        if ($tail =~ s/\[([^][]+)\]/[]/) {
+        if ($tail =~ s/$rxmemo/[]/) {
             $memo = $1;
         }
         else {
@@ -474,16 +621,73 @@ sub parse_pattern {
 
 sub read_journal {
     my ($f) = @_;
+    $f = 'journal' if !defined $f;
     open my $fh, '<', $f or die;
-    my @trx;
+    @all = ();
     while (<$fh>) {
         next if /^\s*(?:#.*)?$/;
         chomp;
         die "Bad line in journal: $_"
             if !/^\d/;
-        push @trx, parse_transaction($_);
+        push @all, parse($_);
     }
-    return @trx;
+}
+
+sub filter_journal {
+    open my $fh, '<', 'journal' or die "Can't open journal: $!";
+    my @lines = grep /^$rxdate /, <$fh>;
+    chomp @lines;
+    foreach my $c (@_) {
+        if ($c =~ /^\@/) {
+            @lines = grep { index($_, " $c ") > 0 } @lines;
+            #@lines = grep { / $c / } @lines;
+        }
+        elsif ($c =~ /^[12]\d{3}/) {
+            @lines = grep { index($_, $c) == 0 } @lines;
+            #@lines = grep { substr($_, 0, length $c) eq $c } @lines;
+        }
+    }
+    close $fh;
+    return @lines;
+}
+
+sub parse {
+    my @tokens = tokenize(@_);
+    my (%trx, $entry, $account);
+    foreach (@tokens) {
+        my ($t, $v) = @$_;
+        if ($t eq ACCOUNT) {
+            die if $trx{$v};
+            $entry = $trx{$v} = {};
+            $account = $v;
+        }
+        elsif (defined $account) {
+            $entry->{lc $t} = $v;
+        }
+        else {
+            $trx{lc $t} = $v;
+        }
+    }
+    return \%trx;
+}
+
+sub entry {
+    my ($trx, $account) = @_;
+    $trx->{$account};
+}
+
+sub has_account {
+    my ($trx, $account) = @_;
+    exists $trx->{$account};
+}
+
+sub uniq {
+    my %seen;
+    my @return;
+    foreach (@_) {
+        push @return, $_ if !$seen{$_}++;
+    }
+    return @return;
 }
 
 =pod
