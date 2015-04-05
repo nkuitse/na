@@ -107,8 +107,16 @@ sub cmd_burst {
     open STDIN, '<', 'journal' or die if ! -t;
     read_journal();
     foreach (@all) {
-        while (my ($k, $v) = each %$_) {
-            1;
+        my $tdate = $_->{'date'};
+        #my $tmemo = $_->{'memo'} // '(no memo)';
+        while (my ($acode, $entries) = each %{ $_->{'entries'} }) {
+            my $account = $account{$acode};
+            my $aclass = $account->{'class'};
+            foreach (@$entries) {
+                my $edate = $_->{'date'};
+                my $eamount = $_->{'amount'} or next;
+                printf "E %s %s %s\n", $edate || $tdate, $eamount, $aclass;
+            }
         }
     }
 }
@@ -532,8 +540,7 @@ sub parse {
     foreach (@tokens) {
         my ($t, $v) = @$_;
         if ($t eq ACCOUNT) {
-            die if $trx{$v};
-            $entry = $trx{$v} = {};
+            push @{ $trx{'entries'}{$v} ||= [] }, $entry = {};
             $account = $v;
         }
         elsif (defined $account) {
