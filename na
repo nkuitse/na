@@ -3,8 +3,6 @@
 use strict;
 use warnings;
 
-use Term::ReadLine::Zoid;
-use Text::ParseWords;
 use File::Spec;
 use File::Glob q(glob);
 use File::Basename qw(dirname basename);
@@ -51,12 +49,6 @@ my $rxbalance = qr/=([0-9]+\.[0-9][0-9])/;
 my $rxlink    = qr/\<([^\<\>]*)\>/;
 my $rxtag     = qr/\:(\S+)/;
 
-my %operator = (
-    AND => \&_and,
-    OR  => \&_or,
-    NOT => \&_not,
-);
-
 my %account;
 my $verbose;
 my %var;
@@ -82,123 +74,6 @@ $sub->();
 
 sub cmd_find {
     print $_, "\n" for filter_journal(@ARGV);
-}
-
-sub cmd_loop {
-    my $term = Term::ReadLine::Zoid->new('na');
-    my $prompt = 'na> ';
-    my $OUT = $term->OUT || \*STDOUT;
-    $running = 1;
-    read_journal();
-    setvar 's0' => \@all;
-    while ($running) {
-        local $_ = $term->readline($prompt);
-        $_ = 'find ' . $_ if /^\@/;
-        @ARGV = shellwords($_);
-        my $sub = __PACKAGE__->can('icmd_' . shift @ARGV) || usage;
-        $sub->();
-    }
-}
-
-sub icmd_quit {
-    $running = 0;
-}
-
-sub getvar { $var{$_[0]} // die }
-
-sub setvar {
-    while (@_) {
-        my ($k, $v) = splice @_, 0, 2;
-        $var{$k} = $v;
-    }
-}
-
-sub next_set { 's' . $next_set++ }
-
-sub mkset {
-    my $ns = next_set();
-    setvar '*' => $ns, $ns => shift;
-    return $ns;
-}
-
-sub icmd_not {
-    my $s = getvar('*');
-    mkset _complement(getvar('@'), getvar($s));
-}
-
-sub icmd_find {
-    # find 2014 @groceries
-    # f 201201..201206
-    # @fees @taxes
-    iusage if !@ARGV;
-    my @sel;
-    if (@ARGV == 3 && $operator{uc $ARGV[1]}) {
-        my @a = operand_value($ARGV[0]);
-        my @b = operand_value($ARGV[2]);
-        my $op = $operator{uc $ARGV[1]};
-        @sel = apply($op, \@a, \@b);
-    }
-    else {
-        @sel = @all;
-        _find_transactions(\@sel, $_) for @ARGV;
-    }
-    mkset \@sel;
-}
-
-sub _and {
-    my %a = map { $_ => 1 } @{ shift() };
-    my @result;
-    foreach (@{ shift() }) {
-        push @result, $_ if $a{$_};
-    }
-    return @result;
-}
-
-sub _or {
-    my %a = map { $_ => 1 } @{ shift() };
-    %a = ( %a, map { $_ => 1 } @{ shift() } );
-    return keys %a;
-}
-
-sub apply {
-    my ($op, $a, $b) = @_;
-    $op->($a, $b);
-}
-
-sub operand_value {
-    local $_ = shift;
-    return by_account($_) if /^\@/;
-}
-
-sub _find_transactions {
-    my ($ary, $cond) = @_;
-    if ($cond =~ /^\@/) {
-        @$ary = grep { has_account($_, $cond) } @$ary;
-    }
-    my %acc  = map { $_ => 1 } grep { /^\@/ } @_;
-    my %date = map { $_ => 1 } map { expand_dates($_) } grep { /^[12]/ } @_;
-    my @rx   = map { qr/$_/  } map { m{^/(.+)/$} ? ($1) : () } @_;
-}
-
-sub by_account {
-    my %want = map { $_ => 1 } @_;
-    my @out;
-    foreach (@all) {
-        my @tokens = parse($_);
-        my $head = shift @tokens;
-        my @tail = grep { $want{$_->{'account'}} } @tokens;
-        push @out, [ $head, @tail ] if @tail;
-    }
-    return @out;
-}
-
-sub by_date {
-    my ($d1, $d2) = @_;
-    $d2 = $d1 if !defined $d1;
-    $d1 =~ s/(?<=^\d\d\d\d)$/-01/;
-    $d1 =~ s/(?<=^\d\d\d\d-\d\d)$/-01/;
-    $d2 =~ s/(?<=^\d\d\d\d)$/-12/;
-    $d2 =~ s/(?<=^\d\d\d\d-\d\d)$/-31/;
 }
 
 sub cmd_sum {
