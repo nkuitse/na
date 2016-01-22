@@ -58,9 +58,7 @@ my $running;
 my @rules;
 my @all;
 
-my $root = $ENV{'FINANCES'} || glob('~/finances');
-die "Can't determine root" if !defined $root;
-$root = File::Spec->rel2abs($root);
+my $root = File::Spec->rel2abs($ENV{'FINANCES'} || glob('~/finances') || die "Can't determine root");
 chdir $root or die "Can't chdir $root: $!";
 
 @ARGV = qw(loop) if !@ARGV;
@@ -71,6 +69,8 @@ foreach ($ARGV[0]) {
 
 my $sub = __PACKAGE__->can('cmd_' . shift @ARGV) || usage;
 $sub->();
+
+# Commands
 
 sub cmd_find {
     print $_, "\n" for filter_journal(@ARGV);
@@ -102,20 +102,34 @@ sub cmd_sum {
     print_table($tb);
 }
 
-sub cmd_burst {
+sub cmd_data {
+    my ($date, $acode, $entries, $aclass);
+    my $filter = sub { 1 };
     read_accounts();
-    open STDIN, '<', 'journal' or die if ! -t;
+    if (@ARGV) {
+        if ($ARGV[0] =~ /^[12][0-9]{3}(?:[-0-3]|$)/) {
+            $filter = make_date_filter(\$date, @ARGV);
+        }
+        elsif ($ARGV[0] =~ /^@/) {
+            $filter = make_account_filter(\$acode, @ARGV);
+        }
+        else {
+            usage;
+        }
+    }
+    #open STDIN, '<', 'journal' or die if ! -t;
     read_journal();
-    foreach (@all) {
-        my $tdate = $_->{'date'};
-        #my $tmemo = $_->{'memo'} // '(no memo)';
-        while (my ($acode, $entries) = each %{ $_->{'entries'} }) {
+    foreach my $trx (@all) {
+        my $tdate = $trx->{'date'};
+        #my $tmemo = $trx->{'memo'} // '(no memo)';
+        while (($acode, $entries) = each %{ $trx->{'entries'} }) {
             my $account = $account{$acode};
-            my $aclass = $account->{'class'};
-            foreach (@$entries) {
-                my $edate = $_->{'date'};
-                my $eamount = $_->{'amount'} or next;
-                printf "E %s %s %s\n", $edate || $tdate, $eamount, $aclass;
+            $aclass = $account->{'class'};
+            foreach my $entry (@$entries) {
+                my $edate = $entry->{'date'};
+                my $eamount = $entry->{'amount'} or next;
+                $date = $edate || $tdate;
+                printf "E %s %s %s\n", $date, $eamount, $aclass // $acode if $filter->();
             }
         }
     }
@@ -137,6 +151,20 @@ sub cmd_accounts {
             $apath = '--';
         }
         push @rows, [ $acode, $aclass, $apath, $adesc ];
+    }
+    $tb->load(sort { $a->[0] cmp $b->[0] } @rows);
+    print_table($tb);
+}
+
+sub cmd_categories {
+    read_accounts();
+    my $tb = make_table(qw(Code Class Description));
+    my @rows;
+    foreach my $acode (sort grep { /^\@/ } keys %account) {
+        my $account = $account{$acode};
+        next if defined $account->{'path'};
+        my ($aclass, $adesc) = @$account{qw(class description)};
+        push @rows, [ $acode, $aclass, $adesc ];
     }
     $tb->load(sort { $a->[0] cmp $b->[0] } @rows);
     print_table($tb);
@@ -202,7 +230,7 @@ sub cmd_import {
         or die "Can't open journal: $!";
 
     foreach my $apath (@ARGV) {
-        my @files = grep -f, glob("$apath/inbox/*");
+        my @files = sort { -M $b <=> -M $a } grep -f, glob("$apath/inbox/*");
         next if !@files;
         if (!-d "$apath/statements") {
             note '<<skip>>', YELLOW if $verbose;
@@ -243,7 +271,8 @@ sub cmd_import {
 sub cmd_apply {
     # Apply rules
     my $rules_file = 'rules';
-    my ($dry_run, $verbose, $from_stdin, $debug, $memo_fmt);
+    my ($dry_run, $verbose, $from_stdin, $debug);
+    my $memo_fmt = '[%-32s]';
     GetOptions(
         'f=s' => \$rules_file,
         'n'   => \$dry_run,
@@ -267,7 +296,7 @@ sub cmd_apply {
     my $str;
     while (<STDIN>) {
         chomp;
-        next if /^\s*(#.*)?$/;  # Not a transaction
+        next if /^($rxdate\s+)?\s*(#.*)?$/;  # Not a transaction
         s/ \@unknown$//;
         s/ \@\@/ @/g;
         $str = $_;
@@ -312,7 +341,7 @@ sub cmd_apply {
             print STDERR 'no match: ', $str, "\n" if $debug;
             $append = '[] @unknown';
         }
-        my @append = tokenize($append);
+        my @append = tokenize('2001-01-01 ' . $append);
         next if !@append;
         shift @append;  # Drop the phony date
         next if !@append;
@@ -321,10 +350,11 @@ sub cmd_apply {
         my @other = grep { $_->[0] ne MEMO } @append;
         @memo = ([ MEMO, '[]' ]) if !@memo;
         @memo = () if grep { $_->[0] eq MEMO } @tokens;
-        @memo = map {
-            (my $str = $_) =~ s/\[ *([^\[\]]+) *\]/sprintf($memo_fmt, $1)/;
-            $str;
-        } @memo if defined $memo_fmt;
+        if (defined $memo_fmt) {
+            foreach (@memo) {
+                $_->[1] =~ s/\[ *([^\[\]]+) *\]/sprintf($memo_fmt, $1)/e;
+            }
+        }
         push @out, $_->[1] for @memo, @tokens, @other;
         my $sum = sum map { $_->[0] eq AMOUNT ? $_->[1] : 0 } ( @tokens, @other );
         push @out, sprintf('%+.2f', -$sum) if abs($sum) >= 0.01;
@@ -347,6 +377,22 @@ sub cmd_apply {
 }
 
 # Other functions
+
+sub make_date_filter {
+    my ($dateref, $d1, $dn) = @_;
+    $d1 =~ s/^([12][0-9]{3})(?:-?([01][0-9])(?:-?([0-3][0-9]))?)?/sprintf('%04d-%02d-%02d', $1, $2||1, $3||1)/e;
+    return sub { $$dateref ge $d1 } if !defined $dn;
+    $dn =~ s/^([12][0-9]{3})(?:-?([01][0-9])(?:-?([0-3][0-9]))?)?/sprintf('%04d-%02d-%02d', $1, $2||12, $3||31)/e;
+    return sub { $$dateref ge $d1 && $$dateref le $dn };
+}
+
+sub make_account_filter {
+    my ($acoderef, $ac) = @_;
+    my $account = $account{$ac};
+    return sub {
+        $account && $$acoderef eq $account->{'code'}
+    };
+}
 
 sub make_table {
     my @head = map { $_, \SEP } @_;
@@ -509,6 +555,7 @@ sub read_journal {
     @all = ();
     while (<$fh>) {
         next if /^\s*(?:#.*)?$/;
+        next if /^\d\d\d\d-\d\d-\d\d\s+#/;
         chomp;
         die "Bad line in journal: $_"
             if !/^\d/;
@@ -528,6 +575,10 @@ sub filter_journal {
         elsif ($c =~ /^[12]\d{3}/) {
             @lines = grep { index($_, $c) == 0 } @lines;
             #@lines = grep { substr($_, 0, length $c) eq $c } @lines;
+        }
+        elsif ($c =~ m{^/(.+)/$}) {
+            my $rx = qr/$1/i;
+            @lines = grep { $_ =~ $rx } @lines;
         }
     }
     close $fh;
