@@ -58,7 +58,7 @@ my $next_set = 1;
 my $running;
 my @rules;
 my @entries;
-my @data;
+my %check;
 
 my $root = File::Spec->rel2abs($ENV{'FINANCES'} || glob('~/finances') || die "Can't determine root");
 chdir $root or die "Can't chdir $root: $!";
@@ -272,11 +272,12 @@ sub cmd_import {
 
 sub cmd_apply {
     # Apply rules
-    my $rules_file = 'rules';
+    my ($rules_file, $checks_file) = qw(rules checks);
     my ($dry_run, $verbose, $from_stdin, $debug);
-    my $memo_fmt = '[%-32s]';
+    my $memo_fmt = '%-32s';
     GetOptions(
         'f=s' => \$rules_file,
+        'c=s' => \$checks_file,
         'n'   => \$dry_run,
         'v'   => \$verbose,
         'i'   => \$from_stdin,
@@ -287,6 +288,7 @@ sub cmd_apply {
     $memo_fmt =~ s/^\[?/[/;  # Make sure the specified
     $memo_fmt =~ s/\]?$/]/;  # format is bracketed
     read_rules($rules_file);
+    read_checks($checks_file);
     if ($dry_run) {
         open STDIN, '<', 'journal' or die "Can't open journal: $!" if !$from_stdin;
     }
@@ -326,7 +328,15 @@ sub cmd_apply {
         my $descrip = $1;
         next if !length($descrip);
         my $append;
+        my @refs = grep { $_->[0] eq REF } @tokens;
+        if (@refs) {
+            @tokens = grep { $_->[0] ne REF } @tokens;
+            foreach (@refs) {
+                (@tokens = grep { $_->[0] ne MEMO } @tokens), last if $append = $check{$_->[1]};
+            }
+        }
         foreach my $rule (@rules) {
+            last if defined $append;
             my ($memo, $code, $src) = @$rule;
             local $_ = $descrip;
             if (defined($append = $code->())) {
@@ -336,7 +346,6 @@ sub cmd_apply {
                     print STDERR '  ', $_, "\n" for split /\n/, $src;
                     print STDERR "\n";
                 }
-                last;
             }
         }
         if (!defined $append) {
@@ -357,7 +366,7 @@ sub cmd_apply {
                 $_->[1] =~ s/\[ *([^\[\]]+) *\]/sprintf($memo_fmt, $1)/e;
             }
         }
-        push @out, $_->[1] for @memo, @tokens, @other;
+        push @out, $_->[1] for @refs, @memo, @tokens, @other;
         my $sum = sum map { $_->[0] eq AMOUNT ? $_->[1] : 0 } ( @tokens, @other );
         push @out, sprintf('%+.2f', -$sum) if abs($sum) >= 0.01;
         $_ = join(' ', @out);
@@ -537,6 +546,18 @@ sub read_rules {
         }
     }
     return @rules;
+}
+
+sub read_checks {
+    my ($f) = @_;
+    return if ! -e $f;
+    open my $fh, '<', $f or die "Can't read checks file: $!";
+    while (<$fh>) {
+        next if /^\s*(?:#.*)?$/;  # Skip blank lines and comments
+        chomp;
+        die "Unrecognized check info: $_" if !/^\s*(\*\S+)\s+(\[[^\[\]]*\]+)\s+(\@\S+)$/;
+        $check{$1} = "$2 $3";
+    }
 }
 
 sub parse_pattern {
