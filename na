@@ -34,7 +34,6 @@ use constant SEP => "\x01";
 
 sub sum;
 sub usage;
-sub fatal;
 sub iusage;
 sub note;
 sub uniq;
@@ -57,8 +56,8 @@ my @sets;
 my $next_set = 1;
 my $running;
 my @rules;
-my @entries;
 my %check;
+my @entries;
 
 my $root = File::Spec->rel2abs($ENV{'FINANCES'} || glob('~/finances') || die "Can't determine root");
 chdir $root or die "Can't chdir $root: $!";
@@ -555,7 +554,7 @@ sub read_checks {
     while (<$fh>) {
         next if /^\s*(?:#.*)?$/;  # Skip blank lines and comments
         chomp;
-        die "Unrecognized check info: $_" if !/^\s*(\*\S+)\s+(\[[^\[\]]*\]+)\s+(\@\S+)$/;
+        die "Unrecognized check info: $_" if !/^\s*(\*\S+)\s+(\[[^\[\]]*\]+)\s+(\@\S+(?:\s+{.+})?)$/;
         $check{$1} = "$2 $3";
     }
 }
