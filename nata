@@ -1,0 +1,225 @@
+#!/bin/zsh
+
+typeset prog=$0 tmpdir cmd autoshow=true
+limiter=( cat )
+classer=( fgrep ' expenses:' )
+folder=( cat )
+brever=( cat )
+grouper=( nata-monthwise )
+rounder=( cat )
+shower=( less -cingS~ -Ps--nata-- )
+hiliter=( cat )
+
+path+=( $prog:h:h/bin /usr/local/libexec/nata)
+
+msg() {
+    tput cup 0 0
+    print -n $'\e[33;1m'"$*"$'\e[0m'
+    tput el
+    home
+}
+
+home() {
+    tput cup 1 0
+}
+
+main() {
+    tmpdir=$(mktemp -dt nata.$$.XXXXXX)
+    trap cleanup EXIT INT QUIT TERM
+    cd $tmpdir
+    na data | sort | tee data.0 | nata-tabulate | nata-pretty-print > view.0
+    prompt="\e[36;1m[nata]\e[0m "
+    clear
+    msg 'Welcome to nata. Press ? for help.'
+    home
+    print -n -- $prompt
+    while true; do
+        read -k cmd
+        sleep 0.167
+        case $cmd in
+            (q) print; exit 0 ;;
+            ([1-9])
+                read; cmd=${cmd}${REPLY}
+                case $cmd in
+                    ([0-9][0-9][0-9][0-9]*/[0-9][0-9][0-9][0-9]*)
+                        limiter=( sed -n "/^E $cmd:h/,/^E $cmd:t/p" )
+                        ;;
+                    ([0-9][0-9][0-9][0-9]*)
+                        limiter=( egrep "^E $cmd" )
+                        ;;
+                esac
+                msg Limit by date: $cmd
+                $autoshow
+                ;;
+            (/)
+                read; cmd=${cmd}${REPLY}
+                if (( $#cmd > 1 )); then
+                    classer=( egrep "${cmd[2,-1]}" )
+                else
+                    classer=( cat )
+                fi
+                msg Limit by category class: $cmd
+                $autoshow
+                ;;
+            (o) print -n 'ption: '
+                read; cmd_o ${REPLY}
+                ;;
+            (@) read; cmd=${cmd}{$REPLY}
+                ;;
+            (\?)
+                help
+                ;;
+            (*) print
+                if grep -q "^cmd_$cmd\(\)" $prog; then
+                    cmd_$cmd $=args
+                fi
+                ;;
+        esac
+        tput ed
+        home
+        print -n -- $prompt
+        tput el
+    done
+}
+
+cmd_q() { exit 0 }
+
+help() {
+    print -l '' ''
+    cat <<EOS
+Keystrokes:
+
+    q   quit
+
+    v   show
+    c   clear screen
+    r   reset view
+
+    a   show all
+    e   show expenses
+
+    y   group by year
+    m   group by month
+
+    b   toggle category abbreviations (no|yes)
+    f   toggle category folding (no|yes)
+    l   toggle viewer (less|head)
+    w   toggle autoshow
+
+    ?   help
+
+EOS
+}
+
+cmd_a() {
+    msg Show all
+    classer=( cat )
+    limiter=( cat )
+    $autoshow
+}
+
+cmd_b() {
+    if [[ ${brever[1]} == cat ]]; then
+        msg Abbreviate cateagories
+        brever=( nata-abbreviate-categories )
+    else
+        msg "Don\'t abbreviate cateagories"
+        brever=( cat )
+    fi
+}
+
+cmd_e() {
+    msg Limit to expenses
+    classer=( grep " expenses:" )
+    $autoshow
+}
+
+headly() {
+    head -n $(( $(tput lines) - 2 ))
+    print
+    pause
+}
+
+lessly() {
+    less -cingS~ -Ps--nata-- 
+    msg 'Welcome to nata. Press ? for help.'
+}
+
+pause() {
+    read -k $'?\e[3;33m--nata--\e[0m'
+    msg 'Welcome to nata. Press ? for help.'
+}
+
+cmd_l() {
+    if [[ ${shower[1]} == head* ]]; then
+        msg View with less
+        shower=( lessly )
+    else
+        msg View with head
+        shower=( headly )
+    fi
+}
+
+cmd_v() {
+    msg Transactions
+    show
+}
+
+cmd_c() {
+    clear
+}
+
+cmd_r() {
+    msg Reset view
+    rm -f data.0
+    na data | sort > data.0
+    nata-tabulate < data.0 | nata-pretty-print > view.0
+    $autoshow
+}
+
+cmd_y() {
+    msg Group by year
+    grouper=( nata-yearwise )
+    $autoshow
+}
+
+cmd_m() {
+    msg Group by month
+    grouper=( nata-monthwise )
+    $autoshow
+}
+
+cmd_f() {
+    if [[ ${folder[1]} == cat ]]; then
+        msg Collapse categories
+        folder=( nata-collapse-categories )
+    else
+        msg Expand categories
+        folder=( cat )
+    fi
+    $autoshow
+}
+
+cmd_w() {
+    if [[ $autoshow == true ]]; then
+        msg Autoshow on
+        autoshow=show
+    else
+        msg Autoshow off
+        autoshow=true
+    fi
+}
+
+show() {
+    #head -n 44 view.0
+    $limiter < data.0 | $classer | $folder | $grouper | $rounder | $brever |
+    nata-tabulate | nata-pretty-print | tee view.0 | $hiliter |
+    $shower
+}
+
+cleanup() {
+    cd /
+    rm -Rf $tmpdir
+}
+
+main "$@"
