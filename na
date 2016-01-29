@@ -272,14 +272,15 @@ sub cmd_import {
 sub cmd_apply {
     # Apply rules
     my ($rules_file, $checks_file) = qw(rules checks);
-    my ($dry_run, $verbose, $from_stdin, $debug);
-    my $memo_fmt = '%-32s';
+    my ($dry_run, $verbose, $from_stdin, $print_all, $debug);
+    my $memo_fmt = '%-36s';
     GetOptions(
         'f=s' => \$rules_file,
         'c=s' => \$checks_file,
         'n'   => \$dry_run,
         'v'   => \$verbose,
         'i'   => \$from_stdin,
+        'a'   => \$print_all,
         'd'   => \$debug,
         'm=s' => \$memo_fmt,
     ) or usage;
@@ -372,7 +373,7 @@ sub cmd_apply {
     }
     continue {
         if ($dry_run) {
-            print $_, "\n" if !/^\s*(?:#.*)?$/ && defined $str && $_ ne $str;
+            print $_, "\n" if !/^\s*(?:#.*)?$/ && defined $str && ($print_all || $_ ne $str);
         }
         else {
             print $_, "\n";
