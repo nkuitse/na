@@ -1,0 +1,12 @@
+#!/usr/bin/perl
+
+my $fmt = $ENV{NATA_FORMAT} || '%+.2f';
+while (<>) {
+    next if !/^E/;
+    chomp;
+    my (undef, $date, $amt) = split / /, $_;
+    $total{$date} += $amt;
+}
+
+printf "E %s $fmt\n", $_, $total{$_} for sort keys %total;
+

@@ -1,0 +1,15 @@
+#!/usr/bin/perl
+
+my $fmt = $ENV{NATA_FORMAT} || '%+.2f';
+
+my $date_len = $0 =~ /month/ ? 7 : 4;
+
+while (<>) {
+    my (undef, $date, $amt, $cat, $note) = split ' ';
+    $tally{$cat}{substr($date, 0, $date_len)} += $amt;
+}
+
+foreach $cat (sort keys %tally) {
+    %amt = %{ $tally{$cat} };
+    printf "E %s $fmt %s\n", $_, $amt{$_}, $cat for sort keys %amt;
+}

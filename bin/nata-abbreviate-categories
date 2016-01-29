@@ -1,0 +1,9 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+
+while (<>) {
+    s/([^\s:]+)(?=:)/substr($1, 0, 1)/eg;
+    print;
+}

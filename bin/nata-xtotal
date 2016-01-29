@@ -1,0 +1,4 @@
+#!/bin/zsh
+
+cat
+print 'FX Total { sum(X) }'

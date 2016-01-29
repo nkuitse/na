@@ -1,0 +1,93 @@
+#!/usr/bin/perl
+
+my $fmt = $ENV{NATA_FORMAT} || '%+.2f';
+
+use strict;
+use warnings;
+
+sub maxnum(@);
+sub fnum($);
+
+my (@cols, %amounts, @rows);
+my ($format, $rule);
+my @data;
+my ($gx, $gy);
+my $tsv = $0 =~ /tsv$/;
+my $hilite = -t STDOUT && !$tsv ? \&hilite : sub { @_ };
+
+while (<>) {
+    chomp;
+    if (/^HY/) {
+        (undef, @rows) = split ' ';
+    }
+    elsif (/^HX/) {
+        (undef, @cols) = split ' ';
+    }
+    elsif (/^GX (\d+)$/) {
+        $gx = $1;
+    }
+    elsif (/^GY (\d+)$/) {
+        $gy = $1;
+    }
+    elsif (/^R/) {
+        my (undef, @A) = split ' ';
+        push @data, [ @A ];
+        $amounts{$_} = 1 for @A;
+    }
+}
+
+@cols && @rows or die;
+
+# s{(.)[^/]+/}{$1/}g for @rows;
+if ($tsv) {
+    $format = join("\t", ('%s') x (1+@cols)) . "\n";
+}
+else {
+    my $cat_width = maxnum map { length($_) } @rows;
+    my $col_width = maxnum map { length($_) } (@cols, keys %amounts);
+    $format = join(' ',
+        "%-${cat_width}.${cat_width}s",     # Category label
+        '|',
+        ( "%${col_width}.${col_width}s" ) x @cols
+    ) . "\n";
+}
+# print STDERR "FORMAT: $format";
+my $header = sprintf $format, '', @cols;
+if (!$tsv) {
+    $rule = $header;
+    $rule =~ tr/|/+/;
+    $rule =~ tr/+\n/-/c;
+}
+else {
+    $rule = '';
+}
+print $hilite->($header . $rule);
+
+foreach (@data) {
+    my @amounts = map { fnum $_ } @$_;
+    push @amounts, '' while @amounts < @cols;
+    print $hilite->(sprintf $format, shift(@rows), @amounts);
+}
+
+# --- Functions
+
+sub hilite {
+    my ($str) = @_;
+    $str =~ s/(--+(?:\+--+)*|\|)/\e[30;1m$1\e[0m/g;
+    return $str;
+}
+
+sub fnum($) {
+    my ($num) = @_;
+    return '' if !defined $num || $num =~ /^[-*]?$/;
+    sprintf $fmt, $num;
+}
+
+sub maxnum(@) {
+    my $max = 0;
+    foreach (@_) {
+        $max = $_ if $_ > $max;
+    }
+    return $max > 8 ? $max : 8;
+}
+

@@ -1,0 +1,4 @@
+#!/bin/zsh
+
+typeset today=$(print -P '%D{%Y-%m-%d}')
+bin/schedule 1 | grep "^S $today"

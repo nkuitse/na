@@ -1,0 +1,4 @@
+#!/bin/zsh
+
+cat
+print 'FY Average { average(Y) }'

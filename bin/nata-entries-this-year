@@ -1,0 +1,3 @@
+#!/bin/zsh
+
+exec bin/entries-by-date $(print -P '%D{%Y}')

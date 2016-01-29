@@ -1,0 +1,97 @@
+#!/usr/bin/perl
+
+my $fmt = $ENV{NATA_FORMAT} || '%+.2f';
+
+use strict;
+use warnings;
+
+my %f = (
+    'sum' => \&sum,
+    'average' => \&average,
+);
+
+my (@hx, @hy, $gx, $gy, @rows, @lx, @fx, @ly, @fy);
+
+while (<>) {
+    if (/^HX (.+)/) {
+    	@hx = split ' ', $1;
+    }
+    elsif (/^HY (.+)/) {
+    	@hy = split ' ', $1;
+    }
+    elsif (/^GX (\d+)/) {
+    	$gx = $1;
+    }
+    elsif (/^GY (\d+)/) {
+    	$gy = $1;
+    }
+    elsif (/^R (.+)/) {
+    	push @rows, [ split ' ', $1 ];
+    }
+    elsif (/^FX (.+) { (.+) }$/) {
+    	push @lx, $1;
+    	push @fx, compile($2);
+    }
+    elsif (/^FY (.+) { (.+) }$/) {
+    	push @ly, $1;
+    	push @fy, compile($2);
+    }
+}
+
+print join(' ', 'HY', @hy, @ly), "\n";
+print join(' ', 'HX', @hx, @lx), "\n";
+print "GX $gx\n";
+print "GY $gy\n";
+
+my @added_rows;
+
+foreach my $row (@rows) {
+    print 'R';
+    my @R = @$row[0..$gx-1];
+    my @tx = @$row[$gx..$#$row];
+    print ' ', $_ for @R, @tx;
+    foreach my $f (@fx) {
+        print ' ', $f->(@R);
+    }
+    print "\n";
+}
+
+if (@fy) {
+	print 'R';
+    foreach my $f (@fy) {
+    	foreach my $i (0..$gx-1) {
+            my @values = map { $_->[$i] } @rows;
+            print ' ', $f->(@values);
+        }
+    }
+    print "\n";
+}
+
+sub compile {
+    my ($f) = @_;
+    $f =~ /^(\w+)\([XY]\)$/ or die;
+    $f{$1} || die "No such function: $f";
+}
+
+sub sum {
+    my @values = grep { defined && $_ ne '*' } @_;
+    my $sum = 0;
+    $sum += $_ for @values;
+    sprintf $fmt, $sum;
+}
+
+sub average {
+    my @values = grep { defined && $_ ne '*' } @_;
+    my $sum = 0;
+    $sum += $_ for @values;
+    sprintf $fmt, $sum / @values;
+}
+
+__END__
+HY expenses/rent expenses/utilities/electric
+HX 2011-01 2011-02 2011-03 2011-04 2011-05 2011-06 2011-07
+GX 7
+GY 2
+R -875.00 -875.00 -875.00 -875.00 -875.00 -875.00 -875.00
+R -125.72 -174.26 -172.88 -162.79 -124.05 -127.53 *
+FX Average { average(X) }

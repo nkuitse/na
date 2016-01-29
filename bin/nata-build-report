@@ -1,0 +1,40 @@
+#!/usr/bin/perl
+
+my $fmt = $ENV{NATA_FORMAT} || '%+.2f';
+my (%tally, %total, %date, %cat);
+
+while (<>) {
+    my (undef, $date, $amt, $cat, $note) = split ' ';
+    $tally{$cat}{$date} += $amt;
+    $total{$date} += $amt;
+    $date{$date}++;
+    $cat{$cat}++;
+}
+
+# Print the header
+my @cats  = sort keys %cat;
+my @dates = sort keys %date;
+print join(" ", "Y", @cats ), "\n";
+print join(" ", "X", @dates), "\n";
+
+# Print category rows
+foreach my $cat (@cats) {
+    print "R";
+    my %amt = %{ $tally{$cat} };
+    foreach $date (@dates) {
+        $a = $amt{$date};
+        if (defined $a) {
+            printf " $fmt", $amt{$date};
+        }
+        else {
+            print ' -';
+        }
+    }
+    print "\n";
+}
+print "T";
+foreach my $date (@dates) {
+    printf " $fmt", $total{$date} || 0;
+}
+print "\n";
+

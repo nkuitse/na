@@ -1,0 +1,3 @@
+#!/bin/zsh
+
+bin/schedule $@ | awk '{ if (!seen[$3]++) print }'

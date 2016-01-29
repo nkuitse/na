@@ -1,0 +1,13 @@
+#!/usr/bin/perl
+
+my $fmt = $ENV{NATA_FORMAT} || '%+.2f';
+
+while (<>) {
+    my ($type, $date, $amt, $cat, $note) = split ' ';
+    $tally{$cat}{$date} += $amt;
+}
+
+foreach $cat (sort keys %tally) {
+    %amt = %{ $tally{$cat} };
+    printf "E %s $fmt %s\n", $_, $amt{$_}, $cat for sort keys %amt;
+}
