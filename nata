@@ -12,57 +12,63 @@ hiliter=( cat )
 
 path+=( $prog:h:h/bin /usr/local/libexec/nata)
 
-msg() {
-    tput cup 0 0
-    print -n $'\e[33;1m'"$*"$'\e[0m'
-    tput el
-    home
-}
-
-home() {
-    tput cup 1 0
-}
-
 main() {
     tmpdir=$(mktemp -dt nata.$$.XXXXXX)
     trap cleanup EXIT INT QUIT TERM
     cd $tmpdir
-    na data | sort | tee data.0 | nata-tabulate | nata-pretty-print > view.0
-    prompt="\e[36;1m[nata]\e[0m "
+    na data | sort | tee data.0 | nata-tabulate | tee table.0 | nata-pretty-print > view.0
+    prompt="\e[36;1m>\e[0m "
     clear
     msg 'Welcome to nata. Press ? for help.'
     home
     print -n -- $prompt
     while true; do
         read -k cmd
-        sleep 0.167
         case $cmd in
             (q) print; exit 0 ;;
             ([1-9])
+                home
+                print -n 'Date(s): '$cmd
                 read; cmd=${cmd}${REPLY}
                 case $cmd in
                     ([0-9][0-9][0-9][0-9]*/[0-9][0-9][0-9][0-9]*)
-                        limiter=( sed -n "/^E $cmd:h/,/^E $cmd:t/p" )
+                        typeset d1=$(canondate $cmd:h)
+                        typeset d2=$(canondate $cmd:t)
+                        [[ -n $d1 && -n $d2 ]] || usage
+                        limiter=( sed -n "/^E $d1/,/^E $d2/p" )
+                        msg Limit by date: $d1 to $d2
+                        $autoshow
                         ;;
                     ([0-9][0-9][0-9][0-9]*)
-                        limiter=( egrep "^E $cmd" )
+                        typeset d=$(canondate $cmd)
+                        [[ -n $d ]] || usage
+                        limiter=( egrep "^E $d" )
+                        msg Limit by date: $d
+                        $autoshow
+                        ;;
+                    (*) msg $'\e[31;1m'Unrecognized date or date range: $cmd$'\e[0m'
                         ;;
                 esac
-                msg Limit by date: $cmd
-                $autoshow
                 ;;
             (/)
-                read; cmd=${cmd}${REPLY}
-                if (( $#cmd > 1 )); then
-                    classer=( egrep "${cmd[2,-1]}" )
+                read; cmd="$REPLY"
+                if [[ -n $cmd ]]; then
+                    msg Limit by category class: $cmd
+                    classer=( egrep "$cmd" )
                 else
+                    msg Removed category class limit
                     classer=( cat )
                 fi
-                msg Limit by category class: $cmd
                 $autoshow
                 ;;
-            (o) print -n 'ption: '
-                read; cmd_o ${REPLY}
+            (o) msg "Options aren\'t implemented yet"
+                ;;
+                # print -n 'ption: '
+                # read; cmd_o ${REPLY}
+                # ;;
+            (p) if read -q '? print? [yN] '; then
+                    msg Printed
+                fi
                 ;;
             (@) read; cmd=${cmd}{$REPLY}
                 ;;
@@ -82,34 +88,9 @@ main() {
     done
 }
 
+# Commands
+
 cmd_q() { exit 0 }
-
-help() {
-    print -l '' ''
-    cat <<EOS
-Keystrokes:
-
-    q   quit
-
-    v   show
-    c   clear screen
-    r   reset view
-
-    a   show all
-    e   show expenses
-
-    y   group by year
-    m   group by month
-
-    b   toggle category abbreviations (no|yes)
-    f   toggle category folding (no|yes)
-    l   toggle viewer (less|head)
-    w   toggle autoshow
-
-    ?   help
-
-EOS
-}
 
 cmd_a() {
     msg Show all
@@ -132,22 +113,6 @@ cmd_e() {
     msg Limit to expenses
     classer=( grep " expenses:" )
     $autoshow
-}
-
-headly() {
-    head -n $(( $(tput lines) - 2 ))
-    print
-    pause
-}
-
-lessly() {
-    less -cingS~ -Ps--nata-- 
-    msg 'Welcome to nata. Press ? for help.'
-}
-
-pause() {
-    read -k $'?\e[3;33m--nata--\e[0m'
-    msg 'Welcome to nata. Press ? for help.'
 }
 
 cmd_l() {
@@ -173,7 +138,7 @@ cmd_r() {
     msg Reset view
     rm -f data.0
     na data | sort > data.0
-    nata-tabulate < data.0 | nata-pretty-print > view.0
+    nata-tabulate < data.0 | tee table.0 | nata-pretty-print > view.0
     $autoshow
 }
 
@@ -210,16 +175,115 @@ cmd_w() {
     fi
 }
 
+cmd_x() {
+    typeset file default=~/natareport.xls
+    read "?Save table to file: [$default] " file
+    : ${file:=$default}
+    $limiter < data.0 | $classer | $folder | $grouper | $rounder | $brever |
+    nata-tabulate | tee table.0 | nata-export $file
+    loffice $file
+}
+
+cmd_d() {
+    typeset file default=~/natadata.xls
+    read "?Save data to file: [$default] " file
+    : ${file:=$default}
+    $limiter < data.0 | $classer | $folder | $rounder | $brever |
+    tee /tmp/ready-to-export-l |
+    nata-export -l $file
+    loffice $file
+}
+
+# Other functions
+
+loffice() {
+    typeset file=$1
+    set -- /usr/bin/libreoffice*
+    if (( $# > 0 )); then
+        $1 $file &
+    else
+        msg $'\e[31;1mCan\'t find libreoffice\e[0m'
+    fi
+}
+
+msg() {
+    tput cup 0 0
+    print -n $'\e[33;1m'"$*"$'\e[0m'
+    tput el
+    home
+}
+
+home() {
+    tput cup 1 0
+}
+
+canondate() {
+    print -- $1 | tr -d -- - | read -a argv
+    case $1 in
+        ([0-9][0-9][0-9][0-9])
+            print $1 ;;
+        ([0-9][0-9][0-9][0-9][0-9][0-9])
+            print ${1[1,4]}-${1[5,6]} ;;
+        ([0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9])
+            print ${1[1,4]}-${1[5,6]}-${1[7,8]} ;;
+    esac
+}
+
+headly() {
+    head -n $(( $(tput lines) - 2 ))
+    print
+    pause
+}
+
+lessly() {
+    less -cingS~ -Ps--nata-- 
+    msg 'Welcome to nata. Press ? for help.'
+}
+
+pause() {
+    read -k $'?\e[3;33m--nata--\e[0m'
+    msg 'Welcome to nata. Press ? for help.'
+}
+
 show() {
     #head -n 44 view.0
     $limiter < data.0 | $classer | $folder | $grouper | $rounder | $brever |
-    nata-tabulate | nata-pretty-print | tee view.0 | $hiliter |
+    nata-tabulate | tee table.0 | nata-pretty-print | tee view.0 | $hiliter |
     $shower
 }
 
 cleanup() {
     cd /
     rm -Rf $tmpdir
+}
+
+help() {
+    print -l '' ''
+    cat <<EOS
+Keystrokes:
+
+    q   quit
+
+    v   show
+    c   clear screen
+    r   reset view
+
+    e   show expense categories only
+    a   show all accounts and categories
+
+    y   group by year
+    m   group by month
+
+    b   toggle category abbreviations (no|yes)
+    f   toggle category folding (no|yes)
+    l   toggle viewer (less|head)
+    w   toggle autoshow
+
+    x   export view to spreadsheet
+    d   export full data to spreadsheet
+
+    ?   help
+EOS
 }
 
 main "$@"
