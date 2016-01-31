@@ -1,0 +1,124 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+
+use Spreadsheet::Wright;
+use Getopt::Long
+    qw(:config posix_default gnu_compat require_order bundling no_ignore_case);
+
+my $fmt = $ENV{NATA_FORMAT} || '%+.2f';
+
+sub usage;
+sub fatal;
+sub fnum($);
+
+my $raw;
+my (@cols, %amounts, @rows);
+my ($format, $rule);
+my @data;
+my ($gx, $gy);
+
+GetOptions(
+    'l|raw-data' => \$raw,
+) or usage;
+usage if @ARGV != 1;
+
+my $fout = glob shift @ARGV;
+my $wright = Spreadsheet::Wright->new(
+    'file' => $fout,
+    'styles' => {
+        'header' => { 'font_weight' => 'bold' },
+    },
+);
+if ($raw) {
+    export_untabulated_data();
+}
+else {
+    export_tabulated_data();
+}
+$wright->close;
+
+# Main functions
+
+sub export_untabulated_data {
+    my @header = ({
+        'content' => [ qw(Date Amount Category/Account Payee/Memo Description) ],
+        'style' => 'header',
+        'header' => 1,
+        'width' => 20,
+    });
+    $wright->addrow(@header);
+    while (<STDIN>) {
+        /^E (\d\d\d\d-\d\d-\d\d) ([-+]\S+) (\S+)(?: \[([^\[\]]*)\] {([^{}]*)})?$/
+            or fatal "Unknown data: $_";
+        $wright->addrow($1, {'format' => '#,##0.00', 'content' => $2}, $3, grep { defined $_ } $4, $5);
+    }
+}
+
+sub export_tabulated_data {
+    while (<STDIN>) {
+        chomp;
+        if (/^HY/) {
+            (undef, @rows) = split ' ';
+        }
+        elsif (/^HX/) {
+            (undef, @cols) = split ' ';
+        }
+        elsif (/^GX (\d+)$/) {
+            $gx = $1;
+        }
+        elsif (/^GY (\d+)$/) {
+            $gy = $1;
+        }
+        elsif (/^R/) {
+            my (undef, @A) = split ' ';
+            push @data, [ @A ];
+            $amounts{$_} = 1 for @A;
+        }
+    }
+    @cols && @rows or fatal "No data to export";
+    my @header = ({
+        'content' => 'Category',
+        'style' => 'header',
+        'header' => 1,
+        'width' => 25,
+    });
+    push @header, {
+        'content' => $_,
+        'style' => 'header',
+        'header' => 1,
+        'align' => 'right',
+    } for @cols;
+    $wright->addrow(@header);
+    foreach (@data) {
+        my @amounts = map { fnum $_ } @$_;
+        my @cells = (
+            shift(@rows),
+            map { +{
+                'content' => $_,
+                'format' => '#,##0.00',
+            } } @amounts
+        );
+        $wright->addrow(@cells);
+    }
+}
+
+# --- Functions
+
+sub usage {
+    print STDERR "usage: nata-export OUT.ods < data.0\n";
+    exit 1;
+}
+
+sub fatal {
+    print STDERR $_, "\n" for @_;
+    exit 2;
+}
+
+sub fnum($) {
+    my ($num) = @_;
+    return '' if !defined $num || $num =~ /^[-*]?$/;
+    sprintf $fmt, $num;
+}
+
