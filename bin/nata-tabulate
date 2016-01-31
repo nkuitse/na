@@ -9,7 +9,7 @@ my (%tally, %total, %date, %cat);
 
 while (<>) {
     print, next if !/^E /;
-    my (undef, $date, $amt, $cat, $note) = split ' ';
+    my (undef, $date, $amt, $cat, $memo, $descrip) = split ' ';
     $tally{$cat}{$date} += $amt;
     $date{$date}++;
     $cat{$cat}++;
