@@ -100,6 +100,10 @@ sub cmd_sum {
 }
 
 sub cmd_data {
+    my $long;
+    GetOptions(
+        'l' => \$long,
+    ) or usage;
     my ($date, $acode, $entries, $aclass);
     my $filter = sub { 1 };
     read_accounts();
@@ -114,11 +118,11 @@ sub cmd_data {
             usage;
         }
     }
-    read_accounts();
     read_journal();
     foreach my $trx (@entries) {
         my $tdate = $trx->{'date'};
-        #my $tmemo = $trx->{'memo'} // '(no memo)';
+        my $tmemo = $trx->{'memo'} // '[]';
+        $tmemo =~ s/(?<=\[)\s+|\s+(?=\])//g;
         while (($acode, $entries) = each %{ $trx->{'entries'} }) {
             my $account = $account{$acode};
             $aclass = $account->{'class'};
@@ -126,7 +130,15 @@ sub cmd_data {
                 my $edate = $entry->{'date'};
                 my $eamount = $entry->{'amount'} or next;
                 $date = $edate || $tdate;
-                printf "E %s %s %s\n", $date, $eamount, $aclass // $acode if $filter->();
+                next if !$filter->();
+                if ($long) {
+                    my $descrip = $entry->{'description'} // '{}';
+                    $descrip =~ s/(?<=\{)\s+|\s+(?=\})//g;
+                    printf "E %s %s %s %s %s\n", $date, $eamount, $aclass // $acode, $tmemo, $descrip;
+                }
+                else {
+                    printf "E %s %s %s\n", $date, $eamount, $aclass // $acode;
+                }
             }
         }
     }
@@ -154,6 +166,11 @@ sub cmd_accounts {
 }
 
 sub cmd_categories {
+    my $rx = qr/./;
+    if (@ARGV) {
+        $ARGV[0] =~ m{^/(.+)/$} or usage;
+        $rx = qr/$1/i;
+    }
     read_accounts();
     my $tb = make_table(qw(Code Class Description));
     my @rows;
@@ -161,7 +178,8 @@ sub cmd_categories {
         my $account = $account{$acode};
         next if defined $account->{'path'};
         my ($aclass, $adesc) = @$account{qw(class description)};
-        push @rows, [ $acode, $aclass, $adesc ];
+        push @rows, [ $acode, $aclass, $adesc ]
+            if grep { $_ =~ $rx } $acode, $aclass, $adesc;
     }
     $tb->load(sort { $a->[0] cmp $b->[0] } @rows);
     print_table($tb);
