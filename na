@@ -345,12 +345,17 @@ sub cmd_apply {
         }
         my $descrip = $1;
         next if !length($descrip);
-        my $append;
+        my ($check_num, $append);
         my @refs = grep { $_->[0] eq REF } @tokens;
         if (@refs) {
             @tokens = grep { $_->[0] ne REF } @tokens;
             foreach (@refs) {
-                (@tokens = grep { $_->[0] ne MEMO } @tokens), last if $append = $check{$_->[1]};
+                $check_num = $_->[1];
+                if (my $ref = $check{$check_num}) {
+                    $append = $ref;
+                    @tokens = grep { $_->[0] ne MEMO } @tokens;
+                    last;
+                }
             }
         }
         foreach my $rule (@rules) {
@@ -379,10 +384,10 @@ sub cmd_apply {
         my @other = grep { $_->[0] ne MEMO } @append;
         @memo = ([ MEMO, '[]' ]) if !@memo;
         @memo = () if grep { $_->[0] eq MEMO } @tokens;
-        if (defined $memo_fmt) {
-            foreach (@memo) {
-                $_->[1] =~ s/\[ *([^\[\]]+) *\]/sprintf($memo_fmt, $1)/e;
-            }
+        my $fmt = $memo_fmt;
+        $fmt =~ s/(\d+)/$1 - length($check_num) - 1/eg if defined $check_num;  # Leave room for the check number
+        foreach (@memo) {
+            $_->[1] =~ s/\[ *([^\[\]]+) *\]/sprintf($fmt, $1)/e;
         }
         push @out, $_->[1] for @refs, @memo, @tokens, @other;
         my $sum = sum map { $_->[0] eq AMOUNT ? $_->[1] : 0 } ( @tokens, @other );
@@ -574,7 +579,7 @@ sub read_checks {
         next if /^\s*(?:#.*)?$/;  # Skip blank lines and comments
         chomp;
         die "Unrecognized check info: $_" if !/^\s*(\*\S+)\s+(\[[^\[\]]*\]+)\s+(\@\S+(?:\s+{.+})?)$/;
-        $check{$1} = "$2 $3";
+        ($check{$1} = "$2 $3") =~ s/\s+\]/]/;
     }
 }
 
