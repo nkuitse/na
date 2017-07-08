@@ -35,6 +35,7 @@ use constant SEP => "\x01";
 sub sum;
 sub usage;
 sub iusage;
+sub fatal;
 sub note;
 sub uniq;
 sub setvar;
@@ -59,8 +60,8 @@ my @rules;
 my %check;
 my @entries;
 
-my $root = File::Spec->rel2abs($ENV{'FINANCES'} || glob('~/finances') || die "Can't determine root");
-chdir $root or die "Can't chdir $root: $!";
+my $root = File::Spec->rel2abs($ENV{'FINANCES'} || glob('~/finances') || fatal "Can't determine root");
+chdir $root or fatal "Can't chdir $root: $!";
 
 @ARGV = qw(loop) if !@ARGV;
 
@@ -206,7 +207,7 @@ sub cmd_statements {
     @accounts = sort grep { !/\@/ } keys %account if !@accounts;
     foreach (@accounts) {
         my $account = $account{$_}
-            or die "Unrecognized account: $_";
+            or fatal "Unrecognized account: $_";
         my ($apath, $aclass, $acode) = @$account{qw(path class code)};
         if (!defined $apath) {
             print STDERR "Warning: not a statement account: $_\n" if @ARGV;
@@ -246,7 +247,7 @@ sub cmd_import {
     read_accounts();
     @ARGV = sort grep { !/\@/ } keys %account if !@ARGV;
     open my $fh, '+>>', 'journal'
-        or die "Can't open journal: $!";
+        or fatal "Can't open journal: $!";
 
     foreach my $apath (@ARGV) {
         my @files = sort { -M $b <=> -M $a } grep -f, glob("$apath/inbox/*");
@@ -262,19 +263,19 @@ sub cmd_import {
             my $fname = basename($f);
             my $ok = eval {
                 $stmt = read_statement($apath, $f);
-                die "can't parse" if !$stmt;
+                fatal "can't parse" if !$stmt;
                 ($cdate, $trx) = @$stmt{qw(cdate transactions)};
-                die 'no transactions found' if !@$trx;
+                fatal 'no transactions found' if !@$trx;
                 my $sdir = "$apath/statements/$cdate";
                 my @done = glob("$sdir/*");
-                die 'already processed?' if @done;
+                fatal 'already processed?' if @done;
                 my $s = "$sdir/$fname";
-                die "mkdir $s: $!" if !-d $sdir && !mkdir $sdir;
+                fatal "mkdir $s: $!" if !-d $sdir && !mkdir $sdir;
                 print $fh
                     "# Statement $cdate $apath\n",
                     @$trx,
                     "\n";
-                rename $f, $s or die "rename $f $s: $!";
+                rename $f, $s or fatal "rename $f $s: $!";
                 note "  <<ok>> $cdate $fname";
             };
             if (!$ok) {
@@ -308,12 +309,12 @@ sub cmd_apply {
     read_rules($rules_file);
     read_checks($checks_file);
     if ($dry_run) {
-        open STDIN, '<', 'journal' or die "Can't open journal: $!" if !$from_stdin;
+        open STDIN, '<', 'journal' or fatal "Can't open journal: $!" if !$from_stdin;
     }
     else {
-        rename 'journal', 'journal-' or die "Can't move journal: $!";
-        open STDIN,  '<', 'journal-' or die "Can't open journal-: $!";
-        open STDOUT, '>', 'journal+' or die "Can't open journal+: $!";
+        rename 'journal', 'journal-' or fatal "Can't move journal: $!";
+        open STDIN,  '<', 'journal-' or fatal "Can't open journal-: $!";
+        open STDOUT, '>', 'journal+' or fatal "Can't open journal+: $!";
     }
     my $str;
     while (<STDIN>) {
@@ -404,10 +405,62 @@ sub cmd_apply {
         #print $_, "\n" if !$dry_run || !defined($str) || $_ ne $str;
     }
     if (!$dry_run) {
-        rename 'journal+', 'journal'  or die "Can't rename journal+: $!";
+        rename 'journal+', 'journal'  or fatal "Can't rename journal+: $!";
         unlink 'journal~';
-        rename 'journal-', 'journal~' or die "Can't rename journal-: $!";
+        rename 'journal-', 'journal~' or fatal "Can't rename journal-: $!";
     }
+}
+
+sub cmd_export {
+    my $format = 'yaml';
+    GetOptions(
+        'format=s' => \$format,
+    ) or usage;
+    usage if @ARGV < 1;
+    my $spec = shift @ARGV;
+    my $formatter = __PACKAGE__->can('export_'.$format) or fatal "Unrecognized export format: $format";
+    my $exporter = __PACKAGE__->can('data_'.$spec) or fatal "Unrecognized export spec $spec";
+    $formatter->($exporter->(@ARGV));
+}
+
+# Data functions
+
+sub data_accounts {
+    read_accounts();
+    my @accounts;
+    while (my ($k, $v) = each %account) {
+        next if $k !~ s/^[@]//;
+        next if !defined $v->{'path'};  # Not an account per se
+        $v->{'code'} = $k;
+        push @accounts, $v;
+    }
+    return sort { $a->{'code'} cmp $b->{'code'} } @accounts;
+}
+
+sub data_account {
+    my ($acode) = @_;
+    read_accounts();
+    my $account = $account{$acode} or fatal "No such account: $acode";
+    return if $acode !~ s/^[@]//;
+    $account->{'code'} = $acode;
+    return $account;
+}
+
+sub data_statements {
+    my ($acode) = @_;
+    read_accounts();
+    my $account = $account{$acode};
+    my $path = $account->{'path'} or return;
+}
+
+sub export_yaml {
+    my $ok;
+    eval {
+        eval 'use YAML qw()';
+        print YAML::Dump(@_);
+        $ok = 1;
+    };
+    fatal "Can't export as YAML: $@" if !$ok;
 }
 
 # Other functions
@@ -465,9 +518,9 @@ sub read_statement {
         $adir = dirname($adir);
     }
     open my $fh, '-|', 'stmt2trx', $acode, $f
-        or die "Can't exec stmt2trx: $!";
+        or fatal "Can't exec stmt2trx: $!";
     my @trx = <$fh>;
-    close $fh or die 'stmt2trx failed: ', $? >> 8;
+    close $fh or fatal 'stmt2trx failed: ', $? >> 8;
     return if @trx < 1;
     return if shift(@trx) !~ /^statement odate=(\d{4}-\d\d-\d\d) cdate=(\d{4}-\d\d-\d\d)$/;
     my ($odate, $cdate) = ($1, $2);
@@ -481,7 +534,7 @@ sub read_statement {
 
 sub read_accounts {
     local $/ = "\n";
-    open my $fh, '<', 'accounts' or die;
+    open my $fh, '<', 'accounts' or fatal;
     while (<$fh>) {
         # @CODE CLASS {DESCRIP}
         # @CODE CLASS {DESCRIP} PATH
@@ -520,15 +573,15 @@ sub tokenize {
         push(@tokens, [BALANCE,     $1]), next if s/^($rxbalance)//;
         push(@tokens, [LINK,        $1]), next if s/^($rxlink)//;
         push(@tokens, [TAG,         $1]), next if s/^($rxtag)//;
-        die "What's this? $_\n";
+        fatal "What's this? $_\n";
     }
-    die "What's this? $_\n" if /\S/;
+    fatal "What's this? $_\n" if /\S/;
     return @tokens;
 }
 
 sub read_rules {
     my ($f) = @_;
-    open my $fh, '<', $f or die;
+    open my $fh, '<', $f or fatal;
     local $/ = '';
     while (<$fh>) {
         chomp;
@@ -574,18 +627,18 @@ sub read_rules {
 sub read_checks {
     my ($f) = @_;
     return if ! -e $f;
-    open my $fh, '<', $f or die "Can't read checks file: $!";
+    open my $fh, '<', $f or fatal "Can't read checks file: $!";
     while (<$fh>) {
         next if /^\s*(?:#.*)?$/;  # Skip blank lines and comments
         chomp;
-        die "Unrecognized check info: $_" if !/^\s*(\*\S+)\s+(\[[^\[\]]*\]+)\s+(\@\S+(?:\s+{.+})?)$/;
+        fatal "Unrecognized check info: $_" if !/^\s*(\*\S+)\s+(\[[^\[\]]*\]+)\s+(\@\S+(?:\s+{.+})?)$/;
         ($check{$1} = "$2 $3") =~ s/\s+\]/]/;
     }
 }
 
 sub parse_pattern {
     local $_ = shift;
-    die if !m{^/(.+)/([a-z]*)$};
+    fatal if !m{^/(.+)/([a-z]*)$};
     my ($pat, $mod) = ($1, $2 || 'i');
     my $str = $pat;
     $str =~ tr{A-Za-z0-9 -'/,&}{}cd;
@@ -597,20 +650,20 @@ sub parse_pattern {
 sub read_journal {
     my ($f) = @_;
     $f = 'journal' if !defined $f;
-    open my $fh, '<', $f or die;
+    open my $fh, '<', $f or fatal;
     @entries = ();
     while (<$fh>) {
         next if /^\s*(?:#.*)?$/;
         next if /^\d\d\d\d-\d\d-\d\d\s+#/;
         chomp;
-        die "Bad line in journal: $_"
+        fatal "Bad line in journal: $_"
             if !/^\d/;
         push @entries, parse($_);
     }
 }
 
 sub filter_journal {
-    open my $fh, '<', 'journal' or die "Can't open journal: $!";
+    open my $fh, '<', 'journal' or fatal "Can't open journal: $!";
     my @lines = grep /^$rxdate /, <$fh>;
     chomp @lines;
     foreach my $c (@_) {
@@ -667,6 +720,16 @@ sub uniq {
         push @return, $_ if !$seen{$_}++;
     }
     return @return;
+}
+
+sub usage {
+    print STDERR "usage: na COMMAND [ARG...]\n";
+    exit 1;
+}
+
+sub fatal {
+    print STDERR "na: @_\n";
+    exit 2;
 }
 
 =pod
