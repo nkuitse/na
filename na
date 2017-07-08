@@ -449,8 +449,16 @@ sub data_account {
 sub data_statements {
     my ($acode) = @_;
     read_accounts();
-    my $account = $account{$acode};
-    my $path = $account->{'path'} or return;
+    my $account = $account{'@'.$acode};
+    my $path = $account->{'path'} or fatal "Not an account: $acode";
+    my @statements;
+    foreach (glob("$root/$path/statements/*")) {
+        next if !-d || !m{/(\d\d\d\d-\d\d-\d\d)$};
+        push @statements, {
+            'date' => $1,
+        };
+    }
+    return @statements;
 }
 
 sub export_yaml {
