@@ -461,6 +461,31 @@ sub data_statements {
     return @statements;
 }
 
+sub data_balances {
+    read_accounts();
+    open my $fh, '<', 'balances' or fatal "open balances: $!";
+    my %account_ym_balance;
+    while (<$fh>) {
+        next if !/^(\d\d\d\d)-(\d\d)-(\d\d) (\S+) (\S+)$/;
+        $account_ym_balance{$5}{"$1-$2"} = [$3, $4];
+    }
+    my @balances;
+    foreach my $a (sort keys %account_ym_balance) {
+        my $account = $account{$a} or next;
+        ($account->{'code'} = $a) =~ s/^[@]//;
+        foreach my $ym (sort keys %{ $account_ym_balance{$a} }) {
+            my $dbal = $account_ym_balance{$a}{$ym};
+            my ($d, $b) = @$dbal;
+            push @balances, {
+                'account' => $account,
+                'date' => "$ym-$d",
+                'balance' => $b,
+            };
+        }
+    }
+    return @balances;
+}
+
 sub export_yaml {
     my $ok;
     eval {
