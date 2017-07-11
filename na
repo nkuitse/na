@@ -759,7 +759,7 @@ sub read_groups {
         $group{$gcode} = {
             'code' => $gcode,
             'description' => $descrip,
-            'members' => [keys %member],
+            'members' => [sort keys %member],
         };
     }
 }
