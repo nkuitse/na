@@ -729,14 +729,22 @@ sub read_groups {
     open my $fh, '<', $f or fatal;
     while (<$fh>) {
         s/\s+(?:#.*)?$//; # Skip blank lines and comments
-        push @tokens, grep { length($_) } split /\s+/;
+        while (m{("[^"]*")|(\S+)}g) {
+            push @tokens, $1 || $2;
+        }
     }
     while (@tokens) {
         my $gcode = shift @tokens;
         $gcode =~ s/^%// or die;
+        my $descrip = ucfirst $gcode;
         die if !@tokens;
         my %member;
         my $tok = shift @tokens;
+        if ($tok =~ /^"(.+)"$/) {
+            $descrip = $1;
+            die if !@tokens;
+            $tok = shift @tokens;
+        }
         if ($tok eq '=') {
             die if !@tokens;
             $member{$_} = 1 for resolve(shift @tokens);
@@ -750,6 +758,7 @@ sub read_groups {
         }
         $group{$gcode} = {
             'code' => $gcode,
+            'description' => $descrip,
             'members' => [keys %member],
         };
     }
