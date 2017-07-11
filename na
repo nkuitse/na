@@ -51,6 +51,7 @@ my $rxlink    = qr/\<([^\<\>]*)\>/;
 my $rxtag     = qr/\:(\S+)/;
 
 my %account;
+my %group;
 my $verbose;
 my %var;
 my @sets;
@@ -437,6 +438,12 @@ sub data_accounts {
     return sort { $a->{'code'} cmp $b->{'code'} } @accounts;
 }
 
+sub data_groups {
+    read_accounts();
+    read_groups();
+    return sort { $a->{'code'} cmp $b->{'code'} } values %group;
+}
+
 sub data_categories {
     read_accounts();
     my @categories;
@@ -713,6 +720,51 @@ sub parse_pattern {
     $str =~ s/^ | $//g;
     $pat = '\b' . $pat . '\b' if $mod =~ s/w//;
     return qr/(?$mod)$pat/i, $str;
+}
+
+sub read_groups {
+    my ($f) = @_;
+    $f = 'groups' if !defined $f;
+    my @tokens;
+    open my $fh, '<', $f or fatal;
+    while (<$fh>) {
+        s/\s+(?:#.*)?$//; # Skip blank lines and comments
+        push @tokens, grep { length($_) } split /\s+/;
+    }
+    while (@tokens) {
+        my $gcode = shift @tokens;
+        $gcode =~ s/^%// or die;
+        die if !@tokens;
+        my %member;
+        my $tok = shift @tokens;
+        if ($tok eq '=') {
+            die if !@tokens;
+            $member{$_} = 1 for resolve(shift @tokens);
+        }
+        elsif ($tok eq '(') {
+            while (@tokens) {
+                $tok = shift @tokens;
+                last if $tok eq ')';
+                $member{$_} = 1 for resolve($tok);
+            }
+        }
+        $group{$gcode} = {
+            'code' => $gcode,
+            'members' => [keys %member],
+        };
+    }
+}
+
+sub resolve {
+    my ($sym) = @_;
+    return $1 if $sym =~ /^[@](\S+)$/;
+    $sym =~ s/(:?)\*$/length($1) ? ':' : '(?::.+)?$'/e;
+    my $rx = qr/^$sym/;
+    return map {
+        $_->{'code'} && $_->{'class'} =~ $rx
+            ? ( resolve($_->{'code'}) )
+            : (                       )
+    } values %account;
 }
 
 sub read_journal {
