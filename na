@@ -437,6 +437,18 @@ sub data_accounts {
     return sort { $a->{'code'} cmp $b->{'code'} } @accounts;
 }
 
+sub data_categories {
+    read_accounts();
+    my @categories;
+    while (my ($k, $v) = each %account) {
+        next if $k !~ s/^[@]//;
+        next if defined $v->{'path'};  # An account per se
+        $v->{'code'} = $k;
+        push @categories, $v;
+    }
+    return sort { $a->{'code'} cmp $b->{'code'} } @categories;
+}
+
 sub data_account {
     my ($acode) = @_;
     read_accounts();
@@ -484,6 +496,29 @@ sub data_balances {
         }
     }
     return @balances;
+}
+
+sub data_expenses {
+    read_journal();
+    read_accounts();
+    my %expense_account;
+    while (my ($acode, $account) = each %account) {
+        next if $acode !~ /^[@]/ || $account->{'class'} !~ /^expenses(?::.+)?$/;
+        $expense_account{$acode} = $account;
+    }
+    my %class_ym_total;
+    foreach my $e (@entries) {
+        my $subentries = $e->{'entries'} or next;
+        my $date = $e->{'date'};
+        my $ym = substr($date, 0, 4) . '-' . substr($date, 5, 2);
+        while (my ($k, $v) = each %$subentries) {
+            my $account = $expense_account{$k}
+                or next;
+            $class_ym_total{$account->{'class'} || 'expenses:unknown'}{$ym} += $_->{'amount'} || 0 for @$v;
+        }
+        1;
+    }
+    1;
 }
 
 sub export_yaml {
@@ -684,7 +719,7 @@ sub read_journal {
     my ($f) = @_;
     $f = 'journal' if !defined $f;
     open my $fh, '<', $f or fatal;
-    @entries = ();
+    # @entries = ();
     while (<$fh>) {
         next if /^\s*(?:#.*)?$/;
         next if /^\d\d\d\d-\d\d-\d\d\s+#/;
