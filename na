@@ -64,7 +64,7 @@ my @entries;
 my $root = File::Spec->rel2abs($ENV{'FINANCES'} || glob('~/finances') || fatal "Can't determine root");
 chdir $root or fatal "Can't chdir $root: $!";
 
-@ARGV = qw(loop) if !@ARGV;
+@ARGV = qw(edit) if !@ARGV;
 
 foreach ($ARGV[0]) {
     unshift(@ARGV, 'find'), last if m{^[/@]|^\d{4}};
