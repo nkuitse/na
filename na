@@ -319,6 +319,7 @@ sub cmd_apply {
     }
     my $str;
     while (<STDIN>) {
+        printf STDERR '%7d  %s', $., $_ if $ENV{'NA_TRACE'};
         chomp;
         next if /^($rxdate\s+)?\s*(#.*)?$/;  # Not a transaction
         s/ \@unknown$//;
@@ -415,7 +416,7 @@ sub cmd_apply {
 sub cmd_export {
     my $format = 'yaml';
     GetOptions(
-        'format=s' => \$format,
+        't|format=s' => \$format,
     ) or usage;
     usage if @ARGV < 1;
     my $spec = shift @ARGV;
@@ -424,9 +425,28 @@ sub cmd_export {
     $formatter->($exporter->(@ARGV));
 }
 
+sub cmd_tokenize {
+    open my $fh, '<', 'journal' or fatal "Can't open journal: $!";
+    while (<$fh>) {
+        chomp;
+        next if /^($rxdate\s+)?\s*(#.*)?$/;  # Not a transaction
+        my $str = $_;
+        s/ \@unknown$//;
+        s/ \@\@/ @/g;
+        my @tokens = tokenize($_);
+        if (!@tokens) {
+            print STDERR "# unparsed: $str\n";
+            next;
+        }
+        print join(' ', @$_), "\n" for @tokens;
+        print "\n";
+    }
+}
+
 # Data functions
 
 sub data_accounts {
+    my $format = shift;
     read_accounts();
     my @accounts;
     while (my ($k, $v) = each %account) {
@@ -439,12 +459,14 @@ sub data_accounts {
 }
 
 sub data_groups {
+    my $format = shift;
     read_accounts();
     read_groups();
     return sort { $a->{'code'} cmp $b->{'code'} } values %group;
 }
 
 sub data_categories {
+    my $format = shift;
     read_accounts();
     my @categories;
     while (my ($k, $v) = each %account) {
@@ -457,6 +479,7 @@ sub data_categories {
 }
 
 sub data_account {
+    my $format = shift;
     my ($acode) = @_;
     read_accounts();
     my $account = $account{$acode} or fatal "No such account: $acode";
@@ -466,6 +489,7 @@ sub data_account {
 }
 
 sub data_statements {
+    my $format = shift;
     my ($acode) = @_;
     read_accounts();
     my $account = $account{'@'.$acode};
@@ -481,6 +505,7 @@ sub data_statements {
 }
 
 sub data_balances {
+    my $format = shift;
     read_accounts();
     open my $fh, '<', 'balances' or fatal "open balances: $!";
     my %account_ym_balance;
@@ -506,6 +531,7 @@ sub data_balances {
 }
 
 sub data_expenses {
+    my $format = shift;
     read_journal();
     read_accounts();
     my %expense_account;
@@ -528,14 +554,56 @@ sub data_expenses {
     1;
 }
 
+sub data_entries {
+    my $format = shift;
+    read_journal();
+    return @entries;
+}
+
+sub data_flat {
+    my $format = shift;
+    read_journal();
+    return map {
+        my $date = $_->{'date'};
+        my $memo = $_->{'memo'} || '[]';
+        $memo =~ s/^\[ *| *\]$//g;
+        my @out;
+        while (my ($acode, $e) = each %{ $_->{'entries'} || {} }) {
+            foreach my $a (@$e) {
+                my $amt = $a->{'amount'}
+                    or next;
+                if ($format eq 'text') {
+                    push @out, $date . ' ' . ($a->{'amount'} || next) . ' ' . $acode . ' ' . $memo;
+                }
+                else {
+                    push @out, {
+                        'date' => $date,
+                        'amount' => $amt,
+                        'account' => $acode,
+                        'memo' => $memo,
+                    };
+                }
+            }
+        }
+        @out;
+    } @entries;
+}
+
 sub export_yaml {
     my $ok;
     eval {
-        eval 'use YAML qw()';
-        print YAML::Dump(@_);
+        eval 'use YAML::XS qw(Dump); 1'
+        or
+        eval 'use YAML qw(Dump); 1'
+        ;
+        print Dump(@_);
         $ok = 1;
     };
     fatal "Can't export as YAML: $@" if !$ok;
+}
+
+sub export_text {
+    print $_, "\n" for @_;
 }
 
 # Other functions
@@ -648,9 +716,9 @@ sub tokenize {
         push(@tokens, [BALANCE,     $1]), next if s/^($rxbalance)//;
         push(@tokens, [LINK,        $1]), next if s/^($rxlink)//;
         push(@tokens, [TAG,         $1]), next if s/^($rxtag)//;
-        fatal "What's this? $_\n";
+        fatal "Unrecognized token at line $.: $_";
     }
-    fatal "What's this? $_\n" if /\S/;
+    fatal "Left-over tokens at line $.: $_" if /\S/;
     return @tokens;
 }
 
@@ -747,13 +815,24 @@ sub read_groups {
         }
         if ($tok eq '=') {
             die if !@tokens;
-            $member{$_} = 1 for resolve(shift @tokens);
+            $tok = shift @tokens;
+            if ($tok =~ s/^!//) {
+                delete $member{$_} for resolve($tok);
+            }
+            else {
+                $member{$_} = 1 for resolve($tok);
+            }
         }
         elsif ($tok eq '(') {
             while (@tokens) {
                 $tok = shift @tokens;
                 last if $tok eq ')';
-                $member{$_} = 1 for resolve($tok);
+                if ($tok =~ s/^!//) {
+                    delete $member{$_} for resolve($tok);
+                }
+                else {
+                    $member{$_} = 1 for resolve($tok);
+                }
             }
         }
         $group{$gcode} = {
