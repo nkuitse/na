@@ -321,14 +321,18 @@ sub cmd_apply {
     while (<STDIN>) {
         printf STDERR '%7d  %s', $., $_ if $ENV{'NA_TRACE'};
         chomp;
-        next if /^($rxdate\s+)?\s*(#.*)?$/;  # Not a transaction
+        next if /^($rxdate\s+)?\s*(#.*)?$/;  # Blank line, comment, or a bare date
         s/ \@unknown$//;
         s/ \@\@/ @/g;
         $str = $_;
-        my @tokens = tokenize($_);
+        my @tokens = eval { tokenize($_) };
         if (!@tokens) {
-            print STDERR "unparsed: $str\n" if $debug;
-            next;
+            if (!$dry_run) {
+                rename('journal-', 'journal')
+                    or print STDERR "Can't put journal back in place: $!";
+                unlink('journal+');
+            }
+            fatal "unparsed: line $.: $_";
         }
         my $date = shift(@tokens)->[1];
         shift @tokens if @tokens && $tokens[0][1] eq '[]';
@@ -441,6 +445,28 @@ sub cmd_tokenize {
         print join(' ', @$_), "\n" for @tokens;
         print "\n";
     }
+}
+
+sub cmd_validate {
+    eval {
+        print STDERR 'Reading accounts ... ';
+        read_accounts();
+        print STDERR "OK\n";
+        print STDERR 'Reading rules ...... ';
+        read_rules('rules');
+        print STDERR "OK\n";
+        print STDERR 'Reading checks ..... ';
+        read_checks('checks');
+        print STDERR "OK\n";
+        print STDERR 'Reading journal .... ';
+        read_journal();
+        print STDERR "OK\n";
+        exit 0;
+    };
+    my ($err) = split /\n/, @$;
+    $err ||= "line $.";
+    print STDERR "Error: $@";
+    exit 2;
 }
 
 # Data functions
@@ -677,7 +703,7 @@ sub read_statement {
 
 sub read_accounts {
     local $/ = "\n";
-    open my $fh, '<', 'accounts' or fatal;
+    open my $fh, '<', 'accounts' or die "open accounts: $!\n";
     while (<$fh>) {
         # @CODE CLASS {DESCRIP}
         # @CODE CLASS {DESCRIP} PATH
@@ -716,15 +742,15 @@ sub tokenize {
         push(@tokens, [BALANCE,     $1]), next if s/^($rxbalance)//;
         push(@tokens, [LINK,        $1]), next if s/^($rxlink)//;
         push(@tokens, [TAG,         $1]), next if s/^($rxtag)//;
-        fatal "Unrecognized token at line $.: $_";
+        die "Unrecognized token at line $.: $_\n";
     }
-    fatal "Left-over tokens at line $.: $_" if /\S/;
+    die "Left-over tokens at line $.: $_\n" if /\S/;
     return @tokens;
 }
 
 sub read_rules {
     my ($f) = @_;
-    open my $fh, '<', $f or fatal;
+    open my $fh, '<', $f or die "open $f: $!\n";
     local $/ = '';
     while (<$fh>) {
         chomp;
@@ -736,6 +762,10 @@ sub read_rules {
         for ($tail) {
             s/\s+/ /msg;
             s/^ | $//g;
+        }
+        my @tokens = eval { tokenize('2000-01-01 ' . $tail) };
+        if (!@tokens) {
+            die "unparseable rule #$.:\n$src\n";
         }
         my $memo;
         if ($tail =~ s/$rxmemo/[]/) {
@@ -770,18 +800,18 @@ sub read_rules {
 sub read_checks {
     my ($f) = @_;
     return if ! -e $f;
-    open my $fh, '<', $f or fatal "Can't read checks file: $!";
+    open my $fh, '<', $f or die "open $f: $!\n";
     while (<$fh>) {
         next if /^\s*(?:#.*)?$/;  # Skip blank lines and comments
         chomp;
-        fatal "Unrecognized check info: $_" if !/^\s*(\*\S+)\s+(\[[^\[\]]*\]+)\s+(\@\S+(?:\s+{.+})?)$/;
+        die "Unrecognized check info: $_\n" if !/^\s*(\*\S+)\s+(\[[^\[\]]*\]+)\s+(\@\S+(?:\s+{.+})?)$/;
         ($check{$1} = "$2 $3") =~ s/\s+\]/]/;
     }
 }
 
 sub parse_pattern {
     local $_ = shift;
-    fatal if !m{^/(.+)/([a-z]*)$};
+    die "invalid pattern: $_\n" if !m{^/(.+)/([a-z]*)$};
     my ($pat, $mod) = ($1, $2 || 'i');
     my $str = $pat;
     $str =~ tr{A-Za-z0-9 -'/,&}{}cd;
@@ -794,7 +824,7 @@ sub read_groups {
     my ($f) = @_;
     $f = 'groups' if !defined $f;
     my @tokens;
-    open my $fh, '<', $f or fatal;
+    open my $fh, '<', $f or die "open $f: $!\n";
     while (<$fh>) {
         s/\s+(?:#.*)?$//; # Skip blank lines and comments
         while (m{("[^"]*")|(\S+)}g) {
@@ -803,18 +833,18 @@ sub read_groups {
     }
     while (@tokens) {
         my $gcode = shift @tokens;
-        $gcode =~ s/^%// or die;
+        $gcode =~ s/^%// or die "invalid group code: $gcode\n";
         my $descrip = ucfirst $gcode;
-        die if !@tokens;
+        die "group code $gcode not followed by other tokens\n" if !@tokens;
         my %member;
         my $tok = shift @tokens;
         if ($tok =~ /^"(.+)"$/) {
             $descrip = $1;
-            die if !@tokens;
+            die "group $gcode description out of place\n" if !@tokens;
             $tok = shift @tokens;
         }
         if ($tok eq '=') {
-            die if !@tokens;
+            die "truncated assignment in group $gcode\n" if !@tokens;
             $tok = shift @tokens;
             if ($tok =~ s/^!//) {
                 delete $member{$_} for resolve($tok);
@@ -858,20 +888,20 @@ sub resolve {
 sub read_journal {
     my ($f) = @_;
     $f = 'journal' if !defined $f;
-    open my $fh, '<', $f or fatal;
+    open my $fh, '<', $f or die "open $f; $!\n";
     # @entries = ();
     while (<$fh>) {
         next if /^\s*(?:#.*)?$/;
         next if /^\d\d\d\d-\d\d-\d\d\s+#/;
         chomp;
-        fatal "Bad line in journal: $_"
+        die "Bad line $. in journal: $_\n"
             if !/^\d/;
         push @entries, parse($_);
     }
 }
 
 sub filter_journal {
-    open my $fh, '<', 'journal' or fatal "Can't open journal: $!";
+    open my $fh, '<', 'journal' or die "open journal: $!\n";
     my @lines = grep /^$rxdate /, <$fh>;
     chomp @lines;
     foreach my $c (@_) {
