@@ -78,25 +78,76 @@ sub cmd_find {
 }
 
 sub cmd_sum {
+    my ($sorter, $reverse);
+    my $only = sub { 1 };
+    my %sortcmp = (
+        'amount' => sub { $a->[0] <=> $b->[0] },
+        'code' => sub { $a->[1] cmp $b->[1] },
+        'class' => sub { $a->[2] cmp $b->[2] },
+        'description' => sub { $a->[3] cmp $b->[3] },
+    );
+    GetOptions(
+        's|sort-by=s' => sub {
+            $sorter = $sortcmp{$_[1]} or usage;
+        },
+        'r|reverse' => \$reverse,
+        'e|expenses' => sub {
+            $only = sub {
+                my %item = @_;
+                $item{'class'} =~ /^expenses(:|$)/;
+            };
+        },
+        'i|income' => sub {
+            $only = sub {
+                my %item = @_;
+                $item{'class'} =~ /^income(:|$)/;
+            },
+        },
+    ) or usage;
     read_accounts();
-    my $tb = make_table(qw(Total Code Class Description));
+    my $tb = make_table({'title' => 'Amount', 'align_title' => 'right'}, qw(Code Class Description));
     my @rows;
     my %sum;
+    my $total = 0;
     while (<STDIN>) {
         chomp;
         next if /^\s*(#.*)?$/;  # Not a transaction
-        while (/ (\@\S+) ([-+]\d+\.\d\d)\b/g) {
-            $sum{$1} += $2;
+        my ($account, $amount);
+        foreach (tokenize($_)) {
+            my ($type, $token) = @$_;
+            if ($type eq ACCOUNT) {
+                $account = $token;
+            }
+            elsif ($type eq AMOUNT) {
+                $sum{$account} += $token;
+            }
         }
+        #while (/ (\@\S+) ([-+]\d+\.\d\d)\b/g) {
+        #    $sum{$1} += $2;
+        #}
     }
     foreach (sort keys %sum) {
+        my $amount = $sum{$_};
         my $account = $account{$_};
         my ($aclass, $adesc) =
             $account ? @$account{qw(class description)}
                      : qw(-- --)
                      ;
-        push @rows, [ sprintf('%+11.2f', $sum{$_}), $_, $aclass, $adesc ];
+        next if !$only->(
+            'class' => $aclass,
+            'description' => $adesc,
+            'amount' => $amount,
+        );
+        push @rows, [ sprintf('%+11.2f', $amount), $_, $aclass, $adesc ];
+        $total += $amount;
     }
+    if (defined $sorter) {
+        @rows = sort { &$sorter } @rows;
+        @rows = reverse @rows if $reverse;
+    }
+    $total = sprintf('%+11.2f', $total);
+    $total =~ s/\+(?=0\.00$)/ /;
+    push @rows, [ $total, 'Total' ];
     $tb->load(@rows);
     print_table($tb);
 }
