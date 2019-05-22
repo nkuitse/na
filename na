@@ -7,6 +7,7 @@ use File::Spec;
 use File::Glob q(glob);
 use File::Basename qw(dirname basename);
 use Text::Table;
+use Text::ParseWords qw(shellwords);
 use Getopt::Long
     qw(:config posix_default gnu_compat require_order bundling no_ignore_case);
 
@@ -290,6 +291,49 @@ sub cmd_statements {
             }
         }
     }
+}
+
+sub cmd_view {
+    #@ view ACCOUNT STATEMENT :: view a statement
+    usage if @ARGV != 2;
+    my ($acc, $period) = @ARGV;
+    read_accounts();
+    $period =~ tr/-//d;
+    my @statements = statements($acc, $period);
+    if (my ($pdf) = grep { /\.pdf$/ } @statements) {
+        system('mupdf', $statements[0]);
+    }
+    elsif (my ($txt) = grep { /\.pdf$/ } @statements) {
+        system('vim', $statements[0]);
+    }
+    elsif (@statements) {
+        print STDERR "I don't know how to show you $statements[0]\n";
+    }
+    else {
+        print STDERR "No statements meet those criteria\n";
+    }
+}
+
+sub cmd_help {
+    #@ help :: show helpful information
+    print STDERR <<'EOS';
+usage: na COMMAND [ARG...]
+commands:
+EOS
+    my $w = 0;
+    my ($commands, $aliases) = commands();
+    my $table = Text::Table->new(\'  ', 'command', \'  ', 'description');
+    foreach (sort { $a->{'name'} cmp $b->{'name'} } @$commands) {
+        my ($name, $args, $descrip) = @$_{qw(name args description)};
+        $table->add(join(' ', $name, @{ $args || [] }), $descrip || '');
+    }
+    print $table->body;
+    $table = Text::Table->new(\'  ', 'alias', \' = ', 'command');
+    print "aliases:\n";
+    foreach (sort keys %$aliases) {
+        $table->add($_, $aliases->{$_});
+    }
+    print $table->body;
 }
 
 sub cmd_import {
@@ -1002,6 +1046,32 @@ sub has_account {
     exists $trx->{$account};
 }
 
+sub statements {
+    my ($account, $period) = @_;
+    $account = $account{$account}
+        || fatal "no such account: $account"
+        if !ref $account;
+    my ($apath, $aclass, $acode) = @$account{qw(path class code)};
+    return if !defined $apath;  # Not a statement account
+    my @dirs = sort map { basename($_) } grep { -d } glob("$apath/statements/*");
+    my @statements;
+    foreach my $dir (@dirs) {
+        my $len = length("$apath/statements/$dir/");
+        my @files = map { substr($_, $len) } grep { -f } glob("$apath/statements/$dir/*");
+        if ($dir =~ /^(\d\d\d\d)-(\d\d)(?:-(\d\d))?$/) {
+            my ($y, $m, $d) = ($1, $2, $3);
+            if (defined($period)) {
+                next if substr($period, 0, 4) ne $y;
+                next if length($period) > 4 && substr($period, 4, 2) ne $m;
+                next if defined $d
+                     && length($period) > 6 && substr($period, 6, 2) ne $d;
+            }
+            push @statements, map { "$apath/statements/$dir/$_" } @files;
+        }
+    }
+    return @statements;
+}
+
 sub uniq {
     my %seen;
     my @return;
@@ -1009,6 +1079,27 @@ sub uniq {
         push @return, $_ if !$seen{$_}++;
     }
     return @return;
+}
+
+sub commands {
+    open my $fh, '<', $0 or die "open $0: $!";
+    my (@commands, %alias);
+COMMAND:
+    while (<$fh>) {
+        my $name = $2;
+        my %cmd = ('name' => $name);
+        while (<$fh>) {
+            $alias{$name} = $1, next COMMAND if /^\s*#\@=\s*(\w+)/;
+            last if !/^\s*#\@ (\w+(?:\s+(.+))?) :: (.+)/;
+            my ($args, $descrip) = ($2, $3);
+            $cmd{'args'} = [ shellwords($args) ],
+            $cmd{'description'} = $3;
+        }
+        push @commands, \%cmd;
+    }
+    $alias{'/PATT/'} = 'grep PATT';
+    $alias{'@LOC'}   = 'ls -l LOC';
+    return (\@commands, \%alias);
 }
 
 sub usage {
