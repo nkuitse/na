@@ -60,6 +60,7 @@ my $next_set = 1;
 my $running;
 my @rules;
 my %check;
+my $lineno;
 my @entries;
 
 my $root = File::Spec->rel2abs($ENV{'FINANCES'} || glob('~/finances') || fatal "Can't determine root");
@@ -110,8 +111,10 @@ sub cmd_sum {
     my @rows;
     my %sum;
     my $total = 0;
+    $lineno = 0;
     while (<STDIN>) {
         chomp;
+        $lineno++;
         next if /^\s*(#.*)?$/;  # Not a transaction
         my ($account, $amount);
         foreach (tokenize($_)) {
@@ -413,9 +416,11 @@ sub cmd_apply {
         open STDOUT, '>', 'journal+' or fatal "Can't open journal+: $!";
     }
     my $str;
+    $lineno = 0;
     while (<STDIN>) {
         printf STDERR '%7d  %s', $., $_ if $ENV{'NA_TRACE'};
         chomp;
+        $lineno++;
         next if /^($rxdate\s+)?\s*(#.*)?$/;  # Blank line, comment, or a bare date
         s/ \@unknown$//;
         s/ \@\@/ @/g;
@@ -526,8 +531,10 @@ sub cmd_export {
 
 sub cmd_tokenize {
     open my $fh, '<', 'journal' or fatal "Can't open journal: $!";
+    $lineno = 0;
     while (<$fh>) {
         chomp;
+        $lineno++;
         next if /^($rxdate\s+)?\s*(#.*)?$/;  # Not a transaction
         my $str = $_;
         s/ \@unknown$//;
@@ -985,7 +992,9 @@ sub read_journal {
     $f = 'journal' if !defined $f;
     open my $fh, '<', $f or die "open $f; $!\n";
     # @entries = ();
+    $lineno = 0;
     while (<$fh>) {
+        $lineno++;
         next if /^\s*(?:#.*)?$/;
         next if /^\d\d\d\d-\d\d-\d\d\s+#/;
         chomp;
