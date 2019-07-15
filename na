@@ -295,16 +295,16 @@ sub cmd_statements {
 
 sub cmd_view {
     #@ view ACCOUNT STATEMENT :: view a statement
-    usage if @ARGV != 2;
+    usage if @ARGV < 1 || @ARGV > 2;
     my ($acc, $period) = @ARGV;
     read_accounts();
-    $period =~ tr/-//d;
-    my @statements = statements($acc, $period);
+    $period =~ tr/-//d if defined $period;
+    my @statements = reverse statements($acc, $period);
     if (my ($pdf) = grep { /\.pdf$/ } @statements) {
-        system('mupdf', $statements[0]);
+        system('mupdf', $pdf);
     }
     elsif (my ($txt) = grep { /\.pdf$/ } @statements) {
-        system('vim', $statements[0]);
+        system('vim', $txt);
     }
     elsif (@statements) {
         print STDERR "I don't know how to show you $statements[0]\n";
