@@ -4,7 +4,7 @@ use strict;
 use warnings;
 
 use File::Spec;
-use File::Glob q(glob);
+use File::Glob q(bsd_glob);
 use File::Basename qw(dirname basename);
 use Text::Table;
 use Text::ParseWords qw(shellwords);
@@ -63,7 +63,7 @@ my %check;
 my $lineno;
 my @entries;
 
-my $root = File::Spec->rel2abs($ENV{'FINANCES'} || glob('~/finances') || fatal "Can't determine root");
+my $root = File::Spec->rel2abs($ENV{'FINANCES'} || bsd_glob('~/finances') || fatal "Can't determine root");
 chdir $root or fatal "Can't chdir $root: $!";
 
 @ARGV = qw(edit) if !@ARGV;
@@ -390,22 +390,23 @@ sub cmd_import {
 sub cmd_apply {
     # Apply rules
     my ($rules_file, $checks_file) = qw(rules checks);
-    my ($dry_run, $verbose, $from_stdin, $print_all, $debug);
+    my ($dry_run, $from_stdin, $print_all);
+    my ($verbose, $debug) = (0, 0);
     my $memo_fmt = '%-36s';
     GetOptions(
         'f=s' => \$rules_file,
         'c=s' => \$checks_file,
         'n'   => \$dry_run,
-        'v'   => \$verbose,
+        'v+'  => \$verbose,
         'i'   => \$from_stdin,
         'a'   => \$print_all,
-        'd'   => \$debug,
+        'd+'  => \$debug,
         'm=s' => \$memo_fmt,
     ) or usage;
-    $verbose = 1 if $debug;
+    $verbose ||= 1 if $debug;
     $memo_fmt =~ s/^\[?/[/;  # Make sure the specified
     $memo_fmt =~ s/\]?$/]/;  # format is bracketed
-    read_rules($rules_file);
+    read_rules($rules_file, $debug > 1 ? (\&debug_rule) : ());
     read_checks($checks_file);
     if ($dry_run) {
         open STDIN, '<', 'journal' or fatal "Can't open journal: $!" if !$from_stdin;
@@ -467,12 +468,12 @@ sub cmd_apply {
         }
         foreach my $rule (@rules) {
             last if defined $append;
-            my ($memo, $code, $src) = @$rule;
+            my ($memo, $code, $src, $rule_num, $rule_file, $rule_line_num) = @$rule;
             local $_ = $descrip;
             if (defined($append = $code->())) {
                 if ($debug) {
                     print STDERR 'match: ', $str, "\n";
-                    print STDERR "rule:\n";
+                    print STDERR "rule $rule_num at $rule_file:$rule_line_num:\n";
                     print STDERR '  ', $_, "\n" for split /\n/, $src;
                     print STDERR "\n";
                 }
@@ -851,14 +852,21 @@ sub tokenize {
 }
 
 sub read_rules {
-    my ($f) = @_;
+    my ($f, $proc) = @_;
     open my $fh, '<', $f or die "open $f: $!\n";
-    local $/ = '';
+    my $src = '';
+    my $rule_line_num;
+    my $rule_num = 0;
+    # local $/ = '';
     while (<$fh>) {
+        $src .= $_;
+        $rule_line_num = $. if !defined $rule_line_num;
         chomp;
-        my $src = $_;
-        s/^[ \t]*#.*//m;
-        next if !/\S/;
+        next if /\S/;     # Keep reading until
+        $_ = $src;        #   we have the whole paragraph
+        s/^[ \t]*#.*//m;  # Strip comment lines
+        next if !/\S/;    # Skip if it's nothing but comment lines
+        $rule_num++;
         my ($head, @tail) = split /\n[ \t]+/;
         my $tail = join(' ', @tail);
         for ($tail) {
@@ -893,8 +901,14 @@ sub read_rules {
                     return $str;
                 },
                 $src,
+                $rule_num,
+                $f,
+                $rule_line_num,
             ];
         }
+        $proc->($rule_num, $f, $rule_line_num, $src) if defined $proc;
+        $src = '';
+        undef $rule_line_num;
     }
     return @rules;
 }
@@ -909,6 +923,12 @@ sub read_checks {
         die "Unrecognized check info: $_\n" if !/^\s*(\*\S+)\s+(\[[^\[\]]*\]+)\s+(\@\S+(?:\s+{.+})?)$/;
         ($check{$1} = "$2 $3") =~ s/\s+\]/]/;
     }
+}
+
+sub debug_rule {
+    my ($rule_num, $f, $rule_line_num, $src) = @_;
+    print STDERR "DEBUG: rule $rule_num @ $f:$rule_line_num\n";
+    print '  ', $_, "\n" for split /\n/, $src;
 }
 
 sub parse_pattern {
