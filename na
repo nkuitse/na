@@ -27,6 +27,8 @@ use constant ACCOUNTDATE => 'ACCOUNT_DATE';
 use constant MEMO        => 'MEMO';
 use constant DESCRIPTION => 'DESCRIPTION';
 use constant AMOUNT      => 'AMOUNT';
+use constant CURRENCY    => 'CURRENCY';
+use constant COLOR       => 'COLOR';
 use constant BALANCE     => 'BALANCE';
 use constant LINK        => 'LINK';
 use constant TAG         => 'TAG';
@@ -41,15 +43,16 @@ sub note;
 sub uniq;
 sub setvar;
 
-my $rxaccount = qr/\@(\S+)/;
-my $rxref     = qr/\*(\S+)/;
-my $rxdate    = qr/[0-2][0-9][0-9][0-9]-?[01][0-9]-?[0-3][0-9]/;  # Allow 0000-00-00 as a placeholder
-my $rxmemo    = qr/\[([^\[\]]*)\]/;
-my $rxdescrip = qr/\{([^\{\}]*)\}/;
-my $rxamount  = qr/([-+])([0-9]*\.[0-9][0-9])/;
-my $rxbalance = qr/=([-+]?[0-9]*\.[0-9][0-9])/;
-my $rxlink    = qr/\<([^\<\>]*)\>/;
-my $rxtag     = qr/\:(\S+)/;
+my $rxaccount  = qr/\@(\S+)/;
+my $rxref      = qr/\*(\S+)/;
+my $rxdate     = qr/[0-2][0-9][0-9][0-9]-?[01][0-9]-?[0-3][0-9]/;  # Allow 0000-00-00 as a placeholder
+my $rxmemo     = qr/\[([^\[\]]*)\]/;
+my $rxdescrip  = qr/\{([^\{\}]*)\}/;
+my $rxamount   = qr/([-+][0-9]+(?:\.[0-9]+)?)(?:([A-Z][A-Z0-9]+)?)/;
+my $rxcolor    = qr/\%(\S+)/;
+my $rxbalance  = qr/=([-+]?[0-9]*\.[0-9][0-9])/;
+my $rxlink     = qr/\<([^\<\>]*)\>/;
+my $rxtag      = qr/\:(\S+)/;
 
 my %account;
 my %group;
@@ -110,7 +113,7 @@ sub cmd_sum {
     my $tb = make_table({'title' => 'Amount', 'align_title' => 'right'}, qw(Code Class Description));
     my @rows;
     my %sum;
-    my $total = 0;
+    my %total;
     $lineno = 0;
     while (<STDIN>) {
         chomp;
@@ -123,7 +126,8 @@ sub cmd_sum {
                 $account = $token;
             }
             elsif ($type eq AMOUNT) {
-                $sum{$account} += $token;
+                my ($amount, $currency) = amount($token);
+                $sum{$account}{$currency} += $amount;
             }
         }
         #while (/ (\@\S+) ([-+]\d+\.\d\d)\b/g) {
@@ -131,27 +135,31 @@ sub cmd_sum {
         #}
     }
     foreach (sort keys %sum) {
-        my $amount = $sum{$_};
+        my $currency2amount = $sum{$_};
         my $account = $account{$_};
         my ($aclass, $adesc) =
             $account ? @$account{qw(class description)}
                      : qw(-- --)
                      ;
-        next if !$only->(
-            'class' => $aclass,
-            'description' => $adesc,
-            'amount' => $amount,
-        );
-        push @rows, [ sprintf('%+11.2f', $amount), $_, $aclass, $adesc ];
-        $total += $amount;
+        while (my ($currency, $amount) = each %$currency2amount) {
+            next if !$only->(
+                'class' => $aclass,
+                'description' => $adesc,
+                'amount' => $amount,
+                'currency' => $currency,
+            );
+            push @rows, [ sprintf('%+11.2f %-9s', $amount, $currency), $_, $aclass, $adesc ];
+            $total{$currency} += $amount;
+        }
     }
     if (defined $sorter) {
         @rows = sort { &$sorter } @rows;
         @rows = reverse @rows if $reverse;
     }
-    $total = sprintf('%+11.2f', $total);
-    $total =~ s/\+(?=0\.00$)/ /;
-    push @rows, [ $total, 'Total' ];
+    foreach my $currency (sort keys %total) {
+        my $total = sprintf('%+11.2f %-9s', $total{$currency}, $currency);
+        push @rows, [ $total, 'Total' ];
+    }
     $tb->load(@rows);
     print_table($tb);
 }
@@ -203,23 +211,42 @@ sub cmd_data {
 
 sub cmd_accounts {
     my $all;
+    my @all_fields = qw(code class path description);
+    my @default_fields = @all_fields;
+    my @fields;
+    my %column_header = map { $_ => ucfirst $_ } @all_fields;
+    my %print_arg = map { $_ => 1 } qw(print_header print_rule);
+    my $just_print_codes;
     GetOptions(
         'a' => \$all,
+        'f=s' => sub { push @fields, split /,/, $_[1] },
+        'c' => \$just_print_codes,
+        'h' => sub { delete @print_arg{qw(print_header print_rule)} },
+        'r' => sub { delete $print_arg{'print_rule'} },
+        't' => sub { $print_arg{'separator'} = "\t" },
     ) or usage;
+    delete @print_arg{qw(print_header print_rule)} if $just_print_codes;
+    @fields = @default_fields if !@fields;
     read_accounts();
-    my $tb = make_table(qw(Code Class Path Description));
-    my @rows;
+    my $tb = make_table(map { $column_header{$_} // fatal "no such field: $_" } @fields);
+    # make_table(qw(Code Class Path Description));
+    my (@rows, %acode2row);
     foreach my $acode (sort grep { /^\@/ } keys %account) {
         my $account = $account{$acode};
-        my ($aclass, $apath, $adesc) = @$account{qw(class path description)};
-        if (!defined $apath) {
+        if (!defined $account->{'path'}) {
             next if !$all;
-            $apath = '--';
+            $account->{'path'} = '--';
         }
-        push @rows, [ $acode, $aclass, $apath, $adesc ];
+        if ($just_print_codes) {
+            print $acode, "\n";
+            next;
+        }
+        my @row = map { defined $_ ? $_ : '' } @$account{@fields};
+        $acode2row{$acode} = \@row;
+        #push @rows, [map { defined $_ ? $_ : '' } @row];
     }
-    $tb->load(sort { $a->[0] cmp $b->[0] } @rows);
-    print_table($tb);
+    $tb->load(map { $acode2row{$_} } sort keys %acode2row);
+    print_table($tb, %print_arg);
 }
 
 sub cmd_categories {
@@ -243,7 +270,7 @@ sub cmd_categories {
 }
 
 sub cmd_edit {
-    exec($ENV{'VISUAL'} || $ENV{'EDITOR'} || 'vi', "$root/journal");
+    exec($ENV{'VISUAL'} || $ENV{'EDITOR'} || 'vi', 'journal');
 }
 
 sub cmd_stm { goto &cmd_statements }
@@ -443,8 +470,9 @@ sub cmd_apply {
         ###     next;
         ### }
         if (/\s$rxaccount\s.* $rxaccount\b/) {
-            my $sum = sum map { $_->[0] eq AMOUNT ? $_->[1] : 0 } @tokens;
-            next if abs($sum) < 0.01;
+            next if sums_zero(grep { $_->[0] eq AMOUNT } @tokens);
+            # my $sum = sum map { $_->[0] eq AMOUNT ? $_->[1] : 0 } @tokens;
+            # next if abs($sum) < 0.01;
         }
         my @descrips = map { $_->[1] } grep { $_->[0] eq DESCRIPTION && $_->[1] ne '{}' } @tokens;
         if (!@descrips || $descrips[0] !~ $rxdescrip) {
@@ -737,6 +765,33 @@ sub export_text {
 
 # Other functions
 
+sub amount {
+    local $_ = shift;
+    m{^$rxamount$} or die "not a valid amount: $_";
+    my ($amount, $currency) = ($1, $2);
+    $currency = 'USD' if !defined $currency;
+    return ($amount, $currency);
+}
+
+sub sums_zero {
+    my %sums = sums(grep { $_->[0] eq AMOUNT } @_);
+    foreach my $currency (keys %sums) {
+        return 0 if abs($sums{$currency}) >= 0.01;
+    }
+    return 1;
+}
+
+sub sums {
+    my (@tokens) = @_;
+    my %sums;
+    foreach (@tokens) {
+        die "not an amount: $_" if $_->[0] ne AMOUNT;
+        my ($amount, $currency) = amount($_->[1]);
+        $sums{$currency} += $amount;
+    }
+    return %sums;
+}
+
 sub make_date_filter {
     my ($dateref, $d1, $dn) = @_;
     $d1 =~ s/^([12][0-9]{3})(?:-?([01][0-9])(?:-?([0-3][0-9]))?)?/sprintf('%04d-%02d-%02d', $1, $2||1, $3||1)/e;
@@ -760,8 +815,24 @@ sub make_table {
 }
 
 sub print_table {
-    my ($tb) = @_;
-    print map { s/\x01/  /g; $_ } $tb->title, $tb->body_rule('-', SEP), $tb->body;
+    my ($tb, %arg) = @_;
+    my $pheader = $arg{'print_header'};
+    my $prule = $arg{'print_rule'};
+    my $sep = $arg{'separator'} // '  ';
+    ### my ($header, $rule) = map { s/\x01/$sep/g; $_ } $tb->title, $tb->body_rule('-', SEP);
+    if ($arg{'print_header'}) {
+        colprint($sep, $tb->title);
+        colprint($sep, $tb->body_rule('-', SEP)) if $prule;
+    }
+    colprint($sep, $tb->body);
+}
+
+sub colprint {
+    my $sep = shift;
+    my @lines = $sep eq "\t"
+        ? map { s/ *\x01/\t/g; $_ } @_
+        : map { s/\x01/$sep/g; $_ } @_;
+    print @lines;
 }
 
 sub sum {
@@ -841,7 +912,9 @@ sub tokenize {
         push(@tokens, [MEMO,        $1]), next if s/^($rxmemo)//;
         push(@tokens, [DESCRIPTION, $1]), next if s/^($rxdescrip)//;
         push(@tokens, [AMOUNT,      $1]), next if s/^($rxamount)//;
-        push(@tokens, [ACCOUNTDATE, $1]), next if s/^(&$rxdate)//;
+        #push(@tokens, [CURRENCY,    $1]), next if s/^($rxcurrency)//;
+        push(@tokens, [COLOR,       $1]), next if s/^($rxcolor)//;
+        push(@tokens, [ACCOUNTDATE, $1]), next if s/^(\&$rxdate)//;
         push(@tokens, [BALANCE,     $1]), next if s/^($rxbalance)//;
         push(@tokens, [LINK,        $1]), next if s/^($rxlink)//;
         push(@tokens, [TAG,         $1]), next if s/^($rxtag)//;
@@ -917,11 +990,19 @@ sub read_checks {
     my ($f) = @_;
     return if ! -e $f;
     open my $fh, '<', $f or die "open $f: $!\n";
+    my %macro;
     while (<$fh>) {
         next if /^\s*(?:#.*)?$/;  # Skip blank lines and comments
         chomp;
-        die "Unrecognized check info: $_\n" if !/^\s*(\*\S+)\s+(\[[^\[\]]*\]+)\s+(\@\S+(?:\s+{.+})?)$/;
-        ($check{$1} = "$2 $3") =~ s/\s+\]/]/;
+        if (/^[!](\S+)\s+(\[[^\[\]]*\]+\s+\@\S+(?:\s+{.+})?)$/) {
+            $macro{$1} = $2;
+        }
+        else {
+            s/!(\S+)/$macro{$1} or die "undefined macro at line $. of $f: $1"/e;
+            die "Unrecognized check info: $_\n"
+                if !/^\s*(\*\S+)\s+(\[[^\[\]]*\]+)\s+(\@\S+(?:\s+{.+})?)$/;
+            ($check{$1} = "$2 $3") =~ s/\s+\]/]/;
+        }
     }
 }
 
